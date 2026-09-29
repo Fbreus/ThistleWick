@@ -11,6 +11,7 @@ import { migrateSave, type SaveV2 } from './save';
 import { ARCS, createProgress, record, nextStep, completedBy, arcProgress, stepDone } from './systems/journal';
 import { logEntries, logCounts, discoveryName } from './systems/discoveries';
 import { newTally, tallyAdd, dawnLines } from './systems/dawn';
+import { STAGE_NAMES, advanceCrops, cropStage, grow, harvestYield, isRipe, isSoil, nearWater } from './systems/garden';
 import type { ChunkData } from './world/worldgen';
 import { ITEMS, BDEF, BLOCK, TL, SOLIDB, OPQ, BCOL, RECIPES, STN, TIERN, DMG, CHOP, MINE, DIGP, BLOCKR } from './items';
 import { icon } from './icons';
@@ -158,9 +159,30 @@ function buildStation(t: string) {
   }
   return g;
 }
-function placeStation(i: number, j: number, k: number, t: StationKind) {
+/** Rebuilds a crop's little model when its growth stage changes. */
+const cropMat = { mound: new THREE.MeshStandardMaterial({ color: 0x5a4028, roughness: 1 }), leaf: new THREE.MeshStandardMaterial({ color: 0x4f8f2c, roughness: 0.9 }), leaf2: new THREE.MeshStandardMaterial({ color: 0x6fb03a, roughness: 0.9 }), root: new THREE.MeshStandardMaterial({ color: 0x8a4f9e, roughness: 0.6, emissive: 0x2a1030 }) };
+function setCropVisual(b: Station) {
+  const o = b.obj; if (!o) return;
+  const stage = cropStage(b.growth ?? 0); if (o.userData.stage === stage) return; o.userData.stage = stage;
+  for (const c of o.children.slice()) { o.remove(c); (c as THREE.Mesh).geometry.dispose(); }
+  const add = (geo: THREE.BufferGeometry, m: THREE.Material, x: number, y: number, z: number, rx = 0, rz = 0) => { const q = new THREE.Mesh(geo, m); q.position.set(x, y, z); q.rotation.set(rx, 0, rz); q.castShadow = true; o.add(q); };
+  add(new THREE.CylinderGeometry(0.3, 0.38, 0.1, 8), cropMat.mound, 0, 0.05, 0);
+  if (stage === 0) { add(new THREE.SphereGeometry(0.06, 6, 5), cropMat.leaf2, 0, 0.12, 0); return; }
+  const n = stage === 1 ? 2 : stage === 2 ? 4 : 5, h = stage === 1 ? 0.28 : stage === 2 ? 0.5 : 0.62;
+  for (let q = 0; q < n; q++) { const a = q / n * TAU + 0.4; add(new THREE.ConeGeometry(0.07, h, 5), q % 2 ? cropMat.leaf : cropMat.leaf2, Math.cos(a) * 0.1, 0.1 + h / 2, Math.sin(a) * 0.1, Math.sin(a) * 0.3, -Math.cos(a) * 0.3); }
+  if (stage === 3) add(new THREE.SphereGeometry(0.15, 8, 6), cropMat.root, 0, 0.16, 0);
+}
+/** Crops are stations that cannot be walked into, so they reuse placement, aiming and breaking. */
+function cropStations() { return stations.filter(b => b.t === 'crop'); }
+function harvestCrop(b: Station) {
+  const ripe = isRipe(b.growth ?? 0); removeStation(b); sfx.pickup(); burst(b.i + 0.5, b.j + 0.4, b.k + 0.5, ripe ? 0x8a4f9e : 0x6fb03a, 6);
+  if (ripe) { const y = harvestYield(Math.random); giveItem('root', y.root); giveItem('seed', y.seed); } else giveItem('seed', 1);
+}
+function placeStation(i: number, j: number, k: number, t: StationKind, growth = 0) {
   const b: Station = { t, i, j, k, hp: BDEF[t].hp, obj: null, ns: !!BDEF[t].ns }; blocks.set(key(i, j, k), b);
-  const o = buildStation(t); o.position.set(i + 0.5, j, k + 0.5); o.rotation.y = Math.round(Math.atan2(P.x - (i + 0.5), P.z - (k + 0.5)) / (Math.PI / 2)) * Math.PI / 2; scene.add(o); b.obj = o; stations.push(b); return b;
+  const o = buildStation(t); o.position.set(i + 0.5, j, k + 0.5); o.rotation.y = Math.round(Math.atan2(P.x - (i + 0.5), P.z - (k + 0.5)) / (Math.PI / 2)) * Math.PI / 2; scene.add(o); b.obj = o; stations.push(b);
+  if (t === 'crop') { b.growth = growth; b.wet = nearWater(getBlock, i, j, k); setCropVisual(b); }
+  return b;
 }
 function removeStation(b: Station) { blocks.delete(key(b.i, b.j, b.k)); if (b.obj) scene.remove(b.obj); const ix = stations.indexOf(b); if (ix >= 0) stations.splice(ix, 1); }
 function pushFromBlocks(o: { x: number; z: number }, r: number, yb: number, yt: number) {
@@ -625,7 +647,7 @@ function makeHeld(id: string) {
     add(new THREE.CylinderGeometry(0.4, 0.4, 0.07, 20), m, 0, 0, 0, Math.PI / 2, 0, 0); add(new THREE.SphereGeometry(0.11, 12, 8), new THREE.MeshStandardMaterial({ color: id === 'cshield' ? 0x8f6bd6 : 0xd8b04a, metalness: 0.7, roughness: 0.3 }), 0, 0, 0.05);
     add(new THREE.TorusGeometry(0.4, 0.03, 6, 20), new THREE.MeshStandardMaterial({ color: 0x3a3a3e, metalness: 0.7, roughness: 0.4 }), 0, 0, 0);
   } else if (d.k === 'block') { add(new THREE.BoxGeometry(0.3, 0.3, 0.3), new THREE.MeshStandardMaterial({ color: BCOL[d.bid!] || 0xaaaaaa, roughness: 0.9, emissive: d.bid === B.CRYSTAL ? 0x2288aa : 0x000000 }), 0, 0.16, 0.05); }
-  else if (d.k === 'station') { const c = ({ bench: 0xb98450, furnace: 0x86888d, camp: 0xd9812a, bed: 0xb7362d, torch: 0xffb030, ladder: 0x9a6a3a } as Record<string, number>)[d.place!] || 0xaaaaaa; add(new THREE.BoxGeometry(0.32, 0.32, 0.32), new THREE.MeshStandardMaterial({ color: c, roughness: 0.8 }), 0, 0.18, 0.05); }
+  else if (d.k === 'station') { const c = ({ bench: 0xb98450, furnace: 0x86888d, camp: 0xd9812a, bed: 0xb7362d, torch: 0xffb030, ladder: 0x9a6a3a, crop: 0x6b8f3a } as Record<string, number>)[d.place!] || 0xaaaaaa; add(new THREE.BoxGeometry(0.32, 0.32, 0.32), new THREE.MeshStandardMaterial({ color: c, roughness: 0.8 }), 0, 0.18, 0.05); }
   else if (d.k === 'food') { const c = ({ berries: 0xc0223a, mushroom: 0xc9a066, cmush: 0x8a4a1e, bandage: 0xf1ece0, meat: 0xd9707a, cmeat: 0x8a4a2a } as Record<string, number>)[id]; add(new THREE.SphereGeometry(0.11, 10, 8), new THREE.MeshStandardMaterial({ color: c, roughness: 0.6 }), 0, 0.12, 0.04); }
   else { const c = ({ wood: 0x7b5330, stick: 0x7a5230, stone: 0x8d8f93, fiber: 0xb7c66a, ore: 0x6f6a66, ingot: 0xd5dbe2, shell: 0x33254d, coal: 0x2a2a2e } as Record<string, number>)[id] || 0xaaaaaa; add(new THREE.IcosahedronGeometry(0.12, 0), new THREE.MeshStandardMaterial({ color: c, roughness: 0.7, metalness: id === 'ingot' ? 0.8 : 0 }), 0, 0.12, 0.04); }
   return g;
@@ -828,7 +850,11 @@ function useItem() {
 }
 function tryPlace() {
   if (!aim.place || !aim.placeOK) { toast('You cannot place that there', true, 1200); P.cool = 0.25; return; }
-  const [i, j, k] = aim.place, s = inv[sel]!, d = ITEMS[s.id]; if (d.k === 'station') { placeStation(i, j, k, d.place!); note('place:' + d.place); } else setVox(i, j, k, d.bid!); s.n--; if (s.n <= 0) inv[sel] = null;
+  const [i, j, k] = aim.place, s = inv[sel]!, d = ITEMS[s.id]; if (d.k === 'station') {
+    if (d.place === 'crop' && !isSoil(getBlock(i, j - 1, k))) { toast('Seeds need soil: grass or dirt', true, 1500); P.cool = 0.25; return; }
+    const pb = placeStation(i, j, k, d.place!); note('place:' + d.place);
+    if (pb.t === 'crop') toast(pb.wet ? 'Planted. Water is close, so it will grow well' : 'Planted. No water nearby, so it will grow slowly', false, 2600);
+  } else setVox(i, j, k, d.bid!); s.n--; if (s.n <= 0) inv[sel] = null;
   P.cool = 0.22; sfx.place(); renderHot(); updateHeld(); if (d.place === 'camp') tip('camp', 'Beetles avoid the fire. Stay close to it at night.');
 }
 function resolveSwing() {
@@ -858,6 +884,7 @@ function giveItem(id: string, n: number) {
   if (id === 'crystal') tip('crystal', 'Glow crystals shine on their own. Place them anywhere for light.');
   if (id === 'meat') tip('meat', 'Roast raw meat over a campfire for a big meal.');
   if (id === 'ore') tip('ore', 'Smelt iron ore in a furnace next to a workbench.');
+  if (id === 'seed') tip('seed', 'Plant a wild seed in grass or dirt, close to water. Crops keep growing while you sleep.');
 }
 function hitNode(n: SceneNode, ts: ToolStats) {
   n.shake = 0.25;
@@ -881,9 +908,10 @@ function fellTree(n: SceneNode) {
 }
 function harvestBush(n: SceneNode) {
   if (!n.ready) { toast('The bush has no berries right now'); return; }
-  n.ready = false; n.regrow = 90; n.mesh.geometry = G.bush; giveItem('berries', 2 + ((Math.random() * 3) | 0)); sfx.pickup(); tip('berry', 'Berries keep your hunger up. Cook mushrooms at a campfire for more.');
+  n.ready = false; n.regrow = 90; n.mesh.geometry = G.bush; giveItem('berries', 2 + ((Math.random() * 3) | 0)); if (Math.random() < 0.6) setTimeout(() => giveItem('seed', 1), 800); sfx.pickup(); tip('berry', 'Berries keep your hunger up. Cook mushrooms at a campfire for more.');
 }
 function hitBlock(b: Station, ts: ToolStats) {
+  if (b.t === 'crop') { harvestCrop(b); return; }
   const def = BDEF[b.t], pow = ts.d && ts.d.tool === def.tool ? ts.blockPow : 0.7; b.hp -= pow; sfx.chop(); burst(b.i + 0.5, b.j + 0.6, b.k + 0.5, (b.t as string) === 'brick' ? 0xaaaaaa : 0xc69258, 5);
   if (ts.d && ts.d.tool === def.tool) wear(ts);
   if (b.hp <= 0) { removeStation(b); giveItem(def.item, 1); sfx.brk(); }
@@ -936,6 +964,7 @@ function interact() {
     const t = aim.block.t;
     if (t === 'bench' || t === 'furnace' || t === 'camp') { toggleInv(true); return; }
     if (t === 'bed') { sleep(aim.block); return; }
+    if (t === 'crop') { harvestCrop(aim.block); return; }
   }
   toggleInv(true);
 }
@@ -944,10 +973,12 @@ function sleep(b: Station) {
   for (const e of enemies) if (!e.dying && Math.hypot(e.x - P.x, e.z - P.z) < 16) { toast('Beetles are too close to sleep', true); return; }
   $('fade').classList.add('on'); state = 'sleep';
   setTimeout(() => {
-    todT = (Math.floor(todT / DAY_LEN) + 1) * DAY_LEN + 0.1 * DAY_LEN; P.hp = 100; P.hunger = Math.max(25, P.hunger - 15); P.spawnX = b.i + 0.5; P.spawnZ = b.k + 2;
+    const skipped = (Math.floor(todT / DAY_LEN) + 1) * DAY_LEN + 0.1 * DAY_LEN - todT; todT += skipped;
+    const garden = advanceCrops(cropStations(), skipped); for (const b of cropStations()) setCropVisual(b);
+    P.hp = 100; P.hunger = Math.max(25, P.hunger - 15); P.spawnX = b.i + 0.5; P.spawnZ = b.k + 2;
     for (const e of enemies.slice()) removeEnemy(e);
     $('fade').classList.remove('on'); state = 'play';
-    note('slept'); showDawn(dawnLines(tally, Math.floor(todT / DAY_LEN) + 1, nextStep(progress)?.step.text ?? null)); tally = newTally();
+    note('slept'); showDawn(dawnLines(tally, Math.floor(todT / DAY_LEN) + 1, nextStep(progress)?.step.text ?? null, garden)); tally = newTally();
   }, 900);
 }
 function die() {
@@ -959,7 +990,8 @@ function die() {
 function respawn() {
   for (const s of inv) if (s && ITEMS[s.id].stack > 1) s.n = Math.ceil(s.n / 2);
   P.hp = 100; P.hunger = Math.max(P.hunger, 60); P.x = P.spawnX; P.z = P.spawnZ; P.y = surf(P.x, P.z); P.vx = P.vz = P.vy = 0; P.grounded = true; P.invuln = 2;
-  todT = (Math.floor(todT / DAY_LEN) + 1) * DAY_LEN + 0.1 * DAY_LEN; for (const e of enemies.slice()) removeEnemy(e);
+  { const skipped = (Math.floor(todT / DAY_LEN) + 1) * DAY_LEN + 0.1 * DAY_LEN - todT; todT += skipped; advanceCrops(cropStations(), skipped); for (const b of cropStations()) setCropVisual(b); }
+  for (const e of enemies.slice()) removeEnemy(e);
   $('over').classList.add('hidden'); state = 'play'; renderHot(); updateHeld();
 }
 let pickupToast = 0;
@@ -1188,6 +1220,7 @@ function updateCamera(dt: number, t: number) {
 
 /* ================= world updates ================= */
 function updateWorld(dt: number, t: number) {
+  if (state === 'play') for (const b of stations) if (b.t === 'crop') { b.growth = grow(b.growth ?? 0, dt, !!b.wet); setCropVisual(b); }
   for (const ch of chunks.values()) for (const n of ch.nodes) {
     if (n.dead) continue;
     if (n.shake > 0) { n.shake -= dt; const s = Math.sin(t * 60) * n.shake * (n.kind === 'tree' ? 0.05 : 0.02); n.mesh.rotation.z = s; n.mesh.rotation.x = s * 0.6; } else if (n.mesh.rotation.z !== 0) { n.mesh.rotation.z = 0; n.mesh.rotation.x = 0; }
@@ -1220,7 +1253,7 @@ function updateAimVisuals() {
     prompt = id === B.BEDROCK ? 'Bedrock' : bd.need > 0 ? 'Mine ' + bd.n.toLowerCase() + (bd.need >= 2 ? ' (stone pickaxe)' : ' (pickaxe)') : (bd.tool === 'axe' ? 'Chop ' : 'Dig ') + bd.n.toLowerCase();
     if (mining && mining.key === key(i, j, k) && id !== B.BEDROCK) prompt += '  ' + Math.round((1 - mining.hp / mining.max) * 100) + '%';
   } else if (aim.ok && aim.type === 'block' && aim.block) {
-    const b = aim.block; selBox.visible = true; selBox.position.set(b.i + 0.5, b.j + 0.5, b.k + 0.5); prompt = b.t === 'bench' ? 'Workbench (E to craft)' : b.t === 'furnace' ? 'Furnace (E to craft)' : b.t === 'camp' ? 'Campfire (E to cook)' : b.t === 'bed' ? 'Bed (E to sleep at night)' : b.t === 'torch' ? 'Pick up torch' : 'Break block';
+    const b = aim.block; selBox.visible = true; selBox.position.set(b.i + 0.5, b.j + 0.5, b.k + 0.5); prompt = b.t === 'bench' ? 'Workbench (E to craft)' : b.t === 'furnace' ? 'Furnace (E to craft)' : b.t === 'camp' ? 'Campfire (E to cook)' : b.t === 'bed' ? 'Bed (E to sleep at night)' : b.t === 'crop' ? (isRipe(b.growth ?? 0) ? 'Thistle root, ripe (E to harvest)' : STAGE_NAMES[cropStage(b.growth ?? 0)] + (b.wet ? '' : ', dry: grows slowly') + ' (hit to uproot)') : b.t === 'torch' ? 'Pick up torch' : 'Break block';
   } else if (aim.ok && aim.type === 'enemy') prompt = 'Gloom beetle';
   const pe = $('prompt'); if (prompt) { pe.textContent = prompt; pe.classList.add('on'); } else pe.classList.remove('on');
 }
@@ -1247,7 +1280,8 @@ function saveGame() {
   try {
     const e: number[] = []; for (const v of edits.values()) e.push(v.i, v.j, v.k, v.id);
     const d: SaveV2 = { v: 2, journal: [...progress], P: { x: P.x, y: P.y, z: P.z, hp: P.hp, hunger: P.hunger, stamina: P.stamina, heading: P.heading, spawnX: P.spawnX, spawnZ: P.spawnZ }, todT, sel, inv: inv.map(s => s ? [s.id, s.n, s.dur] as [string, number, number | undefined] : null), tips, edits: e,
-      stations: stations.map(b => [b.t, b.i, b.j, b.k]), collected: [...collected], dead: [...deadNodes] };
+      stations: stations.filter(b => b.t !== 'crop').map(b => [b.t, b.i, b.j, b.k]),
+      crops: cropStations().map(b => [b.i, b.j, b.k, Math.round(b.growth ?? 0)] as [number, number, number, number]), collected: [...collected], dead: [...deadNodes] };
     localStorage.setItem(SAVE_KEY, JSON.stringify(d)); return true;
   } catch (err) { return false; }
 }
@@ -1262,6 +1296,7 @@ function loadGame() {
     for (const ch of chunks.values()) disposeChunk(ch); chunks.clear();
     ensureChunks(true);
     for (const s of d.stations || []) if (BDEF[s[0]]) placeStation(s[1], s[2], s[3], s[0] as StationKind);
+    for (const c of d.crops || []) placeStation(c[0], c[1], c[2], 'crop', c[3]);
     if (solid(Math.floor(P.x), Math.floor(P.y + 0.1), Math.floor(P.z)) || solid(Math.floor(P.x), Math.floor(P.y + 1.2), Math.floor(P.z))) P.y = surf(P.x, P.z);
     P.grounded = false; camTarget.set(P.x, P.y + 1.25, P.z);
     return true;
@@ -1327,6 +1362,24 @@ function frame(now: number) {
   if (grade) { grade.uniforms.uTime.value = T; grade.uniforms.uDmg.value = dmgFlash * 0.85; grade.uniforms.uVig.value = 0.45 + TOD.night * 0.2 + ugU * 0.15; }
   if (composer) composer.render(dt); else renderer.render(scene, camera);
 }
+/** Test hooks for the browser smoke test. Only exists when the page URL contains ?debug. */
+if (new URLSearchParams(location.search).has('debug')) {
+  (window as unknown as { __tw: unknown }).__tw = {
+    /** Puts a seed in the hand and plants it two blocks east through the normal placement code. */
+    plant() {
+      giveItem('seed', 1); sel = inv.findIndex(s => s && s.id === 'seed'); updateHeld();
+      const i = Math.floor(P.x) + 2, k = Math.floor(P.z); aim.place = [i, surf(i + 0.5, k + 0.5), k]; aim.placeOK = true; tryPlace();
+    },
+    /** Jumps to night, places a bed at the player's feet and sleeps in it. */
+    sleepNow() { todT = Math.floor(todT / DAY_LEN) * DAY_LEN + 0.7 * DAY_LEN; },
+    bedAndSleep() { sleep(placeStation(Math.floor(P.x) - 2, surf(P.x - 2, P.z), Math.floor(P.z), 'bed')); },
+    crops: () => cropStations().map(b => ({ stage: cropStage(b.growth ?? 0), wet: !!b.wet })),
+    progress: () => [...progress],
+    night: () => TOD.night,
+    hp: () => P.hp
+  };
+}
+
 requestAnimationFrame(() => {
   ensureChunks(true); renderHot();
   ready = true; ($('goBtn') as HTMLButtonElement).disabled = false; hasSave = peekSave(); $('goBtn').textContent = hasSave ? 'Continue' : 'Begin'; if (hasSave) $('newBtn').classList.remove('hidden');

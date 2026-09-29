@@ -11,7 +11,8 @@ export interface SaveBase {
 }
 export interface SaveV1 extends SaveBase { v: 1 }
 /** v2 adds the journal and collection log as a list of progress keys. */
-export interface SaveV2 extends SaveBase { v: 2; journal: string[] }
+/** `crops` (optional, added after v2 shipped) holds planted crops as [i, j, k, growth]. */
+export interface SaveV2 extends SaveBase { v: 2; journal: string[]; crops?: [number, number, number, number][] }
 
 const isObj = (x: unknown): x is Record<string, unknown> => typeof x === 'object' && x !== null;
 

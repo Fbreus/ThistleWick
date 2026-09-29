@@ -37,7 +37,7 @@ await page.keyboard.press('KeyJ');
 await sleep(300);
 check(await visible('#journal'), 'J opens the journal');
 const arcs = await page.$$eval('.arc', a => a.length);
-check(arcs === 3, 'three arcs shown, got ' + arcs);
+check(arcs === 4, 'four arcs shown, got ' + arcs);
 await page.click('#jtLog');
 const logCount = await text('#jCount');
 check(/^\d+\/\d+$/.test(logCount), 'log count "' + logCount + '"');
@@ -73,6 +73,34 @@ await sleep(1500);
 const goalAfterV1 = await text('#goalStep');
 check(goalAfterV1 !== 'Punch a tree to gather wood', 'v1 save infers progress, goal is "' + goalAfterV1 + '"');
 
-console.log(JSON.stringify({ label, goalStep, arcs, logCount, invOpen, saved, label2, goalAfterV1, errors }, null, 1));
+// gardening end to end through the debug hooks: plant, sleep a few nights, the crop grows and the dawn card says so
+await page.goto(pathToFileURL(html).href + '?debug', { waitUntil: 'load' });
+await page.evaluate(() => localStorage.clear());
+await page.reload({ waitUntil: 'load' });
+await ready();
+await page.click('#goBtn');
+await sleep(1500);
+await page.evaluate(() => window.__tw.plant());
+await sleep(300);
+const planted = await page.evaluate(() => ({ crops: window.__tw.crops(), progress: window.__tw.progress() }));
+check(planted.crops.length === 1 && planted.crops[0].stage === 0, 'one fresh crop planted: ' + JSON.stringify(planted.crops));
+check(planted.progress.includes('place:crop') && planted.progress.includes('got:seed'), 'planting is recorded in the journal');
+let dawn = '', stage = 0, nights = 0;
+while (stage < 1 && nights < 3) {
+  await page.evaluate(() => window.__tw.sleepNow());
+  await page.waitForFunction(() => window.__tw.night() > 0.5, { timeout: 30000 });
+  await page.evaluate(() => window.__tw.bedAndSleep());
+  await sleep(2600);
+  nights++;
+  dawn = await page.$eval('#dawn', e => (e.classList.contains('show') ? e.textContent : ''));
+  stage = (await page.evaluate(() => window.__tw.crops()))[0].stage;
+}
+check(stage >= 1, 'crop grew after ' + nights + ' night(s), stage ' + stage);
+check(/Day \d+ begins/.test(dawn), 'dawn card shown: "' + dawn + '"');
+check(/Your garden: 1 crop grew/.test(dawn), 'dawn card mentions the garden: "' + dawn + '"');
+check((await page.evaluate(() => window.__tw.progress())).includes('slept'), 'sleeping is recorded');
+await page.screenshot({ path: 'dist/smoke-garden.png' });
+
+console.log(JSON.stringify({ label, goalStep, arcs, logCount, invOpen, saved, label2, goalAfterV1, planted: planted.crops, nights, stage, dawn, errors }, null, 1));
 await browser.close();
 process.exit(errors.length ? 1 : 0);

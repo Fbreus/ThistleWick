@@ -46,7 +46,7 @@ describe('journal', () => {
     const done = completedBy(p, 'slept');
     expect(done.arcs.map(a => a.id)).toEqual(['hearth']);
     expect(arcComplete(p, ARCS[0])).toBe(true);
-    expect(nextStep(p)?.arc.id).toBe('forge');
+    expect(nextStep(p)?.arc.id).toBe('garden');
   });
 
   it('returns null when everything is done', () => {

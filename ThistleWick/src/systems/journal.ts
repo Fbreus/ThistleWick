@@ -20,6 +20,15 @@ export const ARCS: Arc[] = [
     ]
   },
   {
+    id: 'garden', title: 'A Kitchen Garden', blurb: 'Things grow while you sleep. Give them soil, water and a night or two.',
+    steps: [
+      { id: 'seed', text: 'Find a wild seed (berry bushes sometimes hold one)', key: 'got:seed' },
+      { id: 'plant', text: 'Plant the seed in grass or dirt, ideally near water', key: 'place:crop' },
+      { id: 'root', text: 'Sleep, then harvest a ripe thistle root', key: 'got:root' },
+      { id: 'croot', text: 'Roast a root over a campfire', key: 'craft:croot' }
+    ]
+  },
+  {
     id: 'forge', title: 'Iron and Fire', blurb: 'Stone bends to a good pickaxe, and iron bends to a hotter fire.',
     steps: [
       { id: 'stone', text: 'Break rock for stone', key: 'got:stone' },

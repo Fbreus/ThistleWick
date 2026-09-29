@@ -2,7 +2,7 @@ import type * as THREE from 'three';
 import type { StationKind } from './items';
 
 export interface Slot { id: string; n: number; dur?: number }
-export interface Station { t: StationKind; i: number; j: number; k: number; hp: number; obj: THREE.Group | null; ns: boolean }
+export interface Station { t: StationKind; i: number; j: number; k: number; hp: number; obj: THREE.Group | null; ns: boolean; growth?: number; wet?: boolean }
 export interface Edit { i: number; j: number; k: number; id: number }
 
 export type Rgb = number[];

@@ -1,7 +1,7 @@
 import { WG } from './world/worldgen';
 const { B } = WG;
 export type ItemKind = 'res' | 'block' | 'station' | 'food' | 'tool' | 'shield';
-export type StationKind = 'bench' | 'furnace' | 'camp' | 'bed' | 'torch' | 'ladder';
+export type StationKind = 'bench' | 'furnace' | 'camp' | 'bed' | 'torch' | 'ladder' | 'crop';
 export interface ItemDef { id: string; n: string; k: ItemKind; stack: number; bid?: number; place?: StationKind; food?: number; heal?: number; tool?: 'axe' | 'pick' | 'shovel' | 'sword'; tier?: number; dur?: number; reduce?: number }
 export const ITEMS: Record<string, ItemDef> = {};
 function def(id: string, o: Omit<Partial<ItemDef>, "id"> & Pick<ItemDef, "n" | "k">) { ITEMS[id] = Object.assign({ id, stack: 64 }, o); }
@@ -15,6 +15,7 @@ def('berries', { n: 'Berries', k: 'food', food: 14, heal: 2, stack: 32 }); def('
 def('cmush', { n: 'Roasted mushroom', k: 'food', food: 34, heal: 12, stack: 32 }); def('bandage', { n: 'Bandage', k: 'food', food: 0, heal: 35, stack: 16 });
 def('workbench', { n: 'Workbench', k: 'station', place: 'bench', stack: 4 }); def('furnace', { n: 'Furnace', k: 'station', place: 'furnace', stack: 4 });
 def('campfire', { n: 'Campfire', k: 'station', place: 'camp', stack: 8 }); def('bed', { n: 'Bed', k: 'station', place: 'bed', stack: 2 });
+def('seed', { n: 'Wild seed', k: 'station', place: 'crop', stack: 32 }); def('root', { n: 'Thistle root', k: 'food', food: 30, heal: 5, stack: 16 }); def('croot', { n: 'Roasted root', k: 'food', food: 62, heal: 14, stack: 16 });
 export const TIERN = ['', 'Wooden', 'Stone', 'Iron'], DUR = { tool: [0, 45, 100, 260], shield: [0, 60, 120, 260] };
 export const DMG = { sword: [0, 7, 11, 17], axe: [0, 5, 7, 10], pick: [0, 4, 6, 8], shovel: [0, 4, 6, 8] }; export const CHOP = [1, 2.2, 3.6, 5.8]; export const MINE = [0, 1.6, 3.0, 5.2]; export const DIGP = [0, 2.2, 3.6, 5.8]; export const BLOCKR = [0, 0.6, 0.75, 0.9];
 const TP = ['', 'w', 's', 'i'];
@@ -29,7 +30,8 @@ def('cshield', { n: 'Carapace shield', k: 'shield', tier: 4, dur: 150, reduce: 0
 export interface StationDef { hp: number; tool: string; item: string; st: number; ns?: number }
 export const BDEF: Record<string, StationDef> = {
   bench: { hp: 6, tool: 'axe', item: 'workbench', st: 1 }, furnace: { hp: 9, tool: 'pick', item: 'furnace', st: 1 },
-  camp: { hp: 3, tool: 'axe', item: 'campfire', st: 1 }, bed: { hp: 4, tool: 'axe', item: 'bed', st: 1 }, torch: { hp: 1, tool: 'axe', item: 'torch', st: 1, ns: 1 }, ladder: { hp: 1, tool: 'axe', item: 'ladder', st: 1, ns: 1 }
+  camp: { hp: 3, tool: 'axe', item: 'campfire', st: 1 }, bed: { hp: 4, tool: 'axe', item: 'bed', st: 1 }, torch: { hp: 1, tool: 'axe', item: 'torch', st: 1, ns: 1 }, ladder: { hp: 1, tool: 'axe', item: 'ladder', st: 1, ns: 1 },
+  crop: { hp: 1, tool: 'shovel', item: 'seed', st: 1, ns: 1 }
 };
 /* voxel block table: tiles are cells in the texture atlas */
 export const TL = { DIRT: 0, LITTER_SIDE: 1, STONE: 2, IRON: 3, COAL: 4, BEDROCK: 5, SAND: 6, SANDSTONE: 7, SNOW: 8, SNOW_SIDE: 9, GRAVEL: 10, GRASS: 11, GRASS_SIDE: 12, LAVA: 14, CRYSTAL: 15, PLANK: 16, BRICK: 17 };
@@ -71,6 +73,6 @@ export const RECIPES: Recipe[] = [
   { cat: 'Shields', st: 'bench', out: 'ishield', n: 1, in: { ingot: 5, plank: 1 } }, { cat: 'Shields', st: 'bench', out: 'cshield', n: 1, in: { shell: 4, plank: 1, fiber: 2 } },
   { cat: 'Building', st: 'bench', out: 'brick', n: 3, in: { stone: 2 } }, { cat: 'Building', st: 'bench', out: 'furnace', n: 1, in: { stone: 8 } },
   { cat: 'Building', st: 'bench', out: 'bed', n: 1, in: { plank: 3, fiber: 4 } },
-  { cat: 'Furnace and fire', st: 'furnace', out: 'ingot', n: 1, in: { ore: 1, wood: 1 } }, { cat: 'Furnace and fire', st: 'furnace', out: 'ingot', n: 2, in: { ore: 2, coal: 1 } }, { cat: 'Furnace and fire', st: 'camp', out: 'cmush', n: 1, in: { mushroom: 1 } }, { cat: 'Furnace and fire', st: 'camp', out: 'cmeat', n: 1, in: { meat: 1 } }
+  { cat: 'Furnace and fire', st: 'furnace', out: 'ingot', n: 1, in: { ore: 1, wood: 1 } }, { cat: 'Furnace and fire', st: 'furnace', out: 'ingot', n: 2, in: { ore: 2, coal: 1 } }, { cat: 'Furnace and fire', st: 'camp', out: 'cmush', n: 1, in: { mushroom: 1 } }, { cat: 'Furnace and fire', st: 'camp', out: 'croot', n: 1, in: { root: 1 } }, { cat: 'Furnace and fire', st: 'camp', out: 'cmeat', n: 1, in: { meat: 1 } }
 ];
 export const STN: Record<string, string> = { bench: 'a workbench', furnace: 'a furnace', camp: 'a campfire' };
