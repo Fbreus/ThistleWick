@@ -45,6 +45,39 @@ canvas{display:block;position:fixed;inset:0;width:100%;height:100%}
   max-width:min(90vw,560px);transition:opacity .25s,transform .25s;pointer-events:none}
 #toast.show{opacity:1;transform:translate(-50%,0)}
 #toast.bad{border-color:rgba(230,80,40,.6);color:#ffd9b8}
+#goal{position:fixed;right:calc(14px + env(safe-area-inset-right,0px));top:calc(112px + env(safe-area-inset-top,0px));width:min(250px,60vw);padding:9px 13px;text-align:right;font-size:12px;line-height:1.45;cursor:pointer;pointer-events:auto}
+#goal b{display:block;font:500 13px 'Fraunces',Georgia,serif;color:var(--amber)}
+#goal span{display:block;color:rgba(246,236,210,.9)}
+#goal small{display:block;margin-top:3px;color:rgba(246,236,210,.55)}
+#goal small#goalNote{color:#d9efbf;margin-top:2px}
+#goal.flash{border-color:rgba(143,191,90,.8);box-shadow:0 0 14px rgba(143,191,90,.45)}
+#dawn{position:fixed;left:50%;top:calc(18% + env(safe-area-inset-top,0px));transform:translate(-50%,-8px);width:min(420px,88vw);padding:18px 22px;text-align:center;opacity:0;pointer-events:none;transition:opacity .6s,transform .6s;z-index:5}
+#dawn.show{opacity:1;transform:translate(-50%,0);pointer-events:auto;cursor:pointer}
+#dawn h2{font:500 26px/1.2 'Fraunces',Georgia,serif;color:var(--amber);margin-bottom:8px}
+#dawn p{font-size:14px;line-height:1.55;margin-top:4px;color:rgba(246,236,210,.92)}
+#dawn p.next{margin-top:10px;color:#d9efbf}
+#journal{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(6,10,4,.55);z-index:4;padding:14px}
+#jBox{padding:18px;width:min(96vw,720px);max-height:min(92vh,640px);display:flex;flex-direction:column}
+#jTabs{display:flex;gap:8px;margin-bottom:12px}
+#jTabs button{font:600 13px system-ui;border:1px solid var(--line);border-radius:99px;padding:6px 14px;background:transparent;color:rgba(246,236,210,.75);cursor:pointer}
+#jTabs button.on{background:var(--amber);border-color:var(--amber);color:#1c1408}
+#jBody{overflow:auto;padding-right:6px;flex:1;min-height:160px}
+.arc{margin-bottom:16px}
+.arc h3{font:500 17px 'Fraunces',Georgia,serif;color:var(--amber);display:flex;justify-content:space-between;gap:10px}
+.arc h3 small{font:500 12px system-ui;color:rgba(246,236,210,.6)}
+.arc p{font-size:12px;color:rgba(246,236,210,.65);margin:2px 0 8px}
+.stp{font-size:13px;padding:4px 0 4px 26px;position:relative;color:rgba(246,236,210,.5)}
+.stp::before{content:'';position:absolute;left:4px;top:8px;width:11px;height:11px;border-radius:50%;border:2px solid rgba(246,236,210,.3)}
+.stp.done{color:rgba(246,236,210,.9)}
+.stp.done::before{background:var(--sta);border-color:var(--sta)}
+.stp.now{color:var(--paper);font-weight:600}
+.stp.now::before{border-color:var(--amber);box-shadow:0 0 8px rgba(242,177,52,.6)}
+.logsec h3{font:500 14px 'Fraunces',Georgia,serif;margin:12px 0 8px;color:var(--amber)}
+.logg{display:grid;grid-template-columns:repeat(auto-fill,minmax(112px,1fr));gap:8px}
+.le{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:10px;background:rgba(255,255,255,.05);font-size:12px;min-height:46px}
+.le img{width:30px;height:30px;flex:0 0 auto}
+.le .ph{width:30px;height:30px;flex:0 0 auto;border-radius:8px;background:rgba(255,255,255,.07);display:flex;align-items:center;justify-content:center;color:rgba(246,236,210,.35)}
+.le.no{color:rgba(246,236,210,.4)}
 
 #hotbar{position:fixed;left:50%;bottom:calc(14px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);display:flex;gap:6px;padding:8px}
 .slot{width:54px;height:54px;border-radius:9px;border:2px solid rgba(246,236,210,.16);background:rgba(255,255,255,.05);position:relative;display:flex;align-items:center;justify-content:center;cursor:pointer}
@@ -78,7 +111,7 @@ canvas{display:block;position:fixed;inset:0;width:100%;height:100%}
 .rec i.have{color:#cfe8b0}.rec i.lack{color:#f0a08c}
 .rec button{font:600 13px system-ui;border:0;border-radius:8px;padding:8px 14px;background:var(--amber);color:#1c1408;cursor:pointer}
 .rec button:disabled{opacity:.35;cursor:default}
-#closeInv{position:absolute;right:16px;top:14px;font-size:13px;color:rgba(246,236,210,.7)}
+#closeInv,#closeJ{position:absolute;right:16px;top:14px;font-size:13px;color:rgba(246,236,210,.7)}
 
 .overlay{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:radial-gradient(ellipse at 50% 60%,rgba(10,16,6,.35),rgba(6,10,4,.85));padding:20px;z-index:8}
 .card{max-width:560px}
@@ -116,8 +149,10 @@ button:focus-visible{outline:3px solid var(--paper);outline-offset:3px}
     <div class="b"><span>Stamina</span><div class="bar"><i id="stF"></i></div></div>
   </div>
   <div id="clockP" class="panel"><div id="clockT">Morning</div><small id="clockS"></small><small id="clockC"></small></div>
-  <div id="stn" class="panel">Tab opens your pack and crafting<br>1 to 8 or wheel picks an item<br>Left click any block to dig it<br>Coal and a stick make torches</div>
+  <div id="stn" class="panel">Tab opens your pack and crafting<br>1 to 8 or wheel picks an item<br>Left click any block to dig it<br>Coal and a stick make torches<br>J opens your journal and collection</div>
   <div id="toast"></div>
+  <div id="goal" class="panel" title="Open your journal (J)"><b id="goalArc"></b><span id="goalStep"></span><small id="goalNote"></small><small>Journal (J)</small></div>
+  <div id="dawn" class="panel"></div>
   <div id="hotbar" class="panel"></div>
 </div>
 
@@ -127,6 +162,14 @@ button:focus-visible{outline:3px solid var(--paper);outline-offset:3px}
     <div id="invR"><h2>Crafting</h2><div id="pills"></div><div id="recipes"></div></div>
   </div>
   <div id="closeInv">Press Tab or Esc to close</div>
+</div>
+
+<div id="journal" class="hidden">
+  <div id="jBox" class="panel">
+    <div id="jTabs"><button id="jtGoals" class="on">Goals</button><button id="jtLog">Collection <span id="jCount"></span></button></div>
+    <div id="jBody"></div>
+  </div>
+  <div id="closeJ">Press J or Esc to close</div>
 </div>
 
 <div id="touch" class="hidden">

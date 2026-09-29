@@ -6,7 +6,11 @@ import { $, ctx2d } from './dom';
 import { renderer, scene, camera, hemi, sun, lantern, fireLights, U, composer, bloom, grade, view, canvas, tex, MAT } from './render/gfx';
 import { G, mergeGeos, mat4 } from './render/geometry';
 import type { Recipe, StationKind } from './items';
-import type { Slot, Station, Edit, Chunk, MeshBuf, Reader, Rgb, SceneNode, Collider, Pickup, Instance, Enemy, Critter, Aim, ToolStats, Particle, SaveV1 } from './types';
+import type { Slot, Station, Edit, Chunk, MeshBuf, Reader, Rgb, SceneNode, Collider, Pickup, Instance, Enemy, Critter, Aim, ToolStats, Particle } from './types';
+import { migrateSave, type SaveV2 } from './save';
+import { ARCS, createProgress, record, nextStep, completedBy, arcProgress, stepDone } from './systems/journal';
+import { logEntries, logCounts, discoveryName } from './systems/discoveries';
+import { newTally, tallyAdd, dawnLines } from './systems/dawn';
 import type { ChunkData } from './world/worldgen';
 import { ITEMS, BDEF, BLOCK, TL, SOLIDB, OPQ, BCOL, RECIPES, STN, TIERN, DMG, CHOP, MINE, DIGP, BLOCKR } from './items';
 import { icon } from './icons';
@@ -88,11 +92,12 @@ function craft(r: Recipe) {
   for (const k in r.in) if (countItem(k) < r.in[k]) return;
   if (!canHold(r.out, r.n)) { toast('Your pack is full', true); return; }
   for (const k in r.in) removeItems(k, r.in[k]);
-  addItem(r.out, r.n); sfx.craft(); toast('Crafted ' + ITEMS[r.out].n, false, 1400); updateHeld();
+  addItem(r.out, r.n); tallyAdd(tally, 'crafted', r.out, r.n); note('craft:' + r.out); note('got:' + r.out); sfx.craft(); toast('Crafted ' + ITEMS[r.out].n, false, 1400); updateHeld();
   if (r.out.endsWith('shovel')) tip('shovel', 'Left click the ground to dig. Dig down to burrow, and place dirt to reshape the land.');
   if (r.out === 'workbench') tip('bench', 'Place the workbench, then craft tools and weapons next to it.');
 }
 function toggleInv(force?: boolean) {
+  if (journalOpen) toggleJournal(false);
   uiOpen = force !== undefined ? force : !uiOpen;
   $('inv').classList.toggle('hidden', !uiOpen); swapFrom = null;
   if (uiOpen) { if (document.exitPointerLock) document.exitPointerLock(); for (const k in keys) keys[k] = false; mouseHeld = false; }
@@ -761,7 +766,7 @@ function spawnHare() {
 function removeCritter(c: Critter) { scene.remove(c.g); const i = critters.indexOf(c); if (i >= 0) critters.splice(i, 1); }
 function hitCritter(c: Critter, ts: ToolStats) {
   c.hp -= ts.dmg; c.kx = (c.x - P.x) * 3; c.kz = (c.z - P.z) * 3; burst(c.x, c.y + 0.4, c.z, 0xb7a080, 6); sfx.squish(); wear(ts);
-  if (c.hp <= 0) { c.dying = 0.001; giveItem('meat', 1 + (Math.random() < 0.45 ? 1 : 0)); }
+  if (c.hp <= 0) { c.dying = 0.001; note('kill:hare'); giveItem('meat', 1 + (Math.random() < 0.45 ? 1 : 0)); }
 }
 function updateCritters(dt: number) {
   spawnH -= dt;
@@ -823,7 +828,7 @@ function useItem() {
 }
 function tryPlace() {
   if (!aim.place || !aim.placeOK) { toast('You cannot place that there', true, 1200); P.cool = 0.25; return; }
-  const [i, j, k] = aim.place, s = inv[sel]!, d = ITEMS[s.id]; if (d.k === 'station') placeStation(i, j, k, d.place!); else setVox(i, j, k, d.bid!); s.n--; if (s.n <= 0) inv[sel] = null;
+  const [i, j, k] = aim.place, s = inv[sel]!, d = ITEMS[s.id]; if (d.k === 'station') { placeStation(i, j, k, d.place!); note('place:' + d.place); } else setVox(i, j, k, d.bid!); s.n--; if (s.n <= 0) inv[sel] = null;
   P.cool = 0.22; sfx.place(); renderHot(); updateHeld(); if (d.place === 'camp') tip('camp', 'Beetles avoid the fire. Stay close to it at night.');
 }
 function resolveSwing() {
@@ -840,11 +845,11 @@ function resolveSwing() {
 }
 function hitEnemy(e: Enemy, ts: ToolStats) {
   e.hp -= ts.dmg; e.kx = (e.x - P.x) * 3; e.kz = (e.z - P.z) * 3; sfx.squish(); burst(e.x, e.y + 0.6, e.z, 0x8f6bd6, 8); drawBar(e); wear(ts);
-  if (e.hp <= 0) { e.dying = 0.001; if (Math.random() < 0.7) giveItem('shell', 1 + (Math.random() < 0.35 ? 1 : 0)); }
+  if (e.hp <= 0) { e.dying = 0.001; tally.kills++; note('kill:beetle'); if (Math.random() < 0.7) giveItem('shell', 1 + (Math.random() < 0.35 ? 1 : 0)); }
 }
 function giveItem(id: string, n: number) {
   const left = addItem(id, n);
-  if (left < n) toast('+' + (n - left) + ' ' + ITEMS[id].n, false, 1300);
+  if (left < n) { toast('+' + (n - left) + ' ' + ITEMS[id].n, false, 1300); tallyAdd(tally, 'gathered', id, n - left); note('got:' + id); }
   if (left > 0) toast('Your pack is full', true, 1200);
   if (id === 'wood') tip('wood', 'Open your pack with Tab. Turn wood into planks and sticks, then build a workbench.');
   if (id === 'stone') tip('stone', 'Stone plus wood makes a campfire. Rocks need a pickaxe.');
@@ -924,6 +929,7 @@ function digCell(i: number, j: number, k: number, id: number) {
 }
 function interact() {
   if (state !== 'play') return;
+  if (journalOpen) { toggleJournal(false); return; }
   if (uiOpen) { toggleInv(false); return; }
   if (aim.type === 'node' && aim.node && aim.node.kind === 'bush' && aim.ok) { harvestBush(aim.node); return; }
   if (aim.type === 'block' && aim.block && aim.ok) {
@@ -940,7 +946,8 @@ function sleep(b: Station) {
   setTimeout(() => {
     todT = (Math.floor(todT / DAY_LEN) + 1) * DAY_LEN + 0.1 * DAY_LEN; P.hp = 100; P.hunger = Math.max(25, P.hunger - 15); P.spawnX = b.i + 0.5; P.spawnZ = b.k + 2;
     for (const e of enemies.slice()) removeEnemy(e);
-    $('fade').classList.remove('on'); state = 'play'; toast('You wake at dawn, rested');
+    $('fade').classList.remove('on'); state = 'play';
+    note('slept'); showDawn(dawnLines(tally, Math.floor(todT / DAY_LEN) + 1, nextStep(progress)?.step.text ?? null)); tally = newTally();
   }, 900);
 }
 function die() {
@@ -972,6 +979,70 @@ function tip(k: string, text: string) { if (tips[k]) return; tips[k] = 1; setTim
 let toastTimer = 0;
 function toast(text: string, bad?: boolean, ms?: number) { const el = $('toast'); el.textContent = text; el.className = 'show' + (bad ? ' bad' : ''); clearTimeout(toastTimer); toastTimer = window.setTimeout(() => { el.className = ''; }, ms || 2600); }
 
+/* ================= journal, collection log and dawn card ================= */
+const progress = createProgress();
+let tally = newTally(), journalOpen = false, journalTab: 'goals' | 'log' = 'goals', dawnTimer = 0, goalFlash = 0;
+function renderGoal() {
+  if (performance.now() < goalFlash) return;
+  const n = nextStep(progress);
+  $('goalArc').textContent = n ? n.arc.title + '  ' + arcProgress(progress, n.arc).done + '/' + n.arc.steps.length : 'Journal complete';
+  $('goalStep').textContent = n ? n.step.text : 'Every goal is done. The forest is yours.';
+}
+/** Records progress. The first time a key is seen it may complete a goal, add a log entry or finish a chapter. */
+function note(key: string) {
+  if (!record(progress, key)) return;
+  const name = discoveryName(key); if (name) tally.discoveries.push(name);
+  const done = completedBy(progress, key);
+  if (done.steps.length) {
+    goalFlash = performance.now() + 2600; $('goalStep').textContent = '\u2713 ' + done.steps[0].step.text; $('goal').classList.add('flash');
+    setTimeout(() => { $('goal').classList.remove('flash'); goalFlash = 0; renderGoal(); }, 2600);
+  }
+  if (name) { const t = 'New in your log: ' + name; $('goalNote').textContent = t; setTimeout(() => { if ($('goalNote').textContent === t) $('goalNote').textContent = ''; }, 3200); }
+  if (done.arcs.length) setTimeout(() => toast('Chapter complete: ' + done.arcs[0].title, false, 3200), 1500);
+  renderGoal(); if (journalOpen) renderJournal();
+}
+function renderJournal() {
+  const body = $('jBody'); body.innerHTML = '';
+  $('jtGoals').classList.toggle('on', journalTab === 'goals'); $('jtLog').classList.toggle('on', journalTab === 'log');
+  const c = logCounts(progress); $('jCount').textContent = c.found + '/' + c.total;
+  if (journalTab === 'goals') {
+    const cur = nextStep(progress);
+    for (const arc of ARCS) {
+      const pr = arcProgress(progress, arc), wrap = document.createElement('div'); wrap.className = 'arc';
+      wrap.innerHTML = '<h3>' + arc.title + '<small>' + pr.done + '/' + pr.total + '</small></h3><p>' + arc.blurb + '</p>';
+      for (const s of arc.steps) { const d = document.createElement('div'); d.className = 'stp' + (stepDone(progress, s) ? ' done' : cur && cur.step === s ? ' now' : ''); d.textContent = s.text; wrap.appendChild(d); }
+      body.appendChild(wrap);
+    }
+  } else {
+    const titles = { items: 'Things', places: 'Places', creatures: 'Creatures' } as const;
+    for (const sec of ['items', 'places', 'creatures'] as const) {
+      const wrap = document.createElement('div'); wrap.className = 'logsec'; const h = document.createElement('h3'); h.textContent = titles[sec]; wrap.appendChild(h);
+      const grid = document.createElement('div'); grid.className = 'logg';
+      for (const e of logEntries()) if (e.section === sec) {
+        const found = progress.has(e.key), row = document.createElement('div'); row.className = 'le' + (found ? '' : ' no');
+        if (found && e.icon) { const im = document.createElement('img'); im.src = icon(e.icon); row.appendChild(im); } else { const ph = document.createElement('div'); ph.className = 'ph'; ph.textContent = found ? '\u2713' : '?'; row.appendChild(ph); }
+        const nm = document.createElement('span'); nm.textContent = found ? e.name : '???'; row.appendChild(nm); grid.appendChild(row);
+      }
+      wrap.appendChild(grid); body.appendChild(wrap);
+    }
+  }
+}
+function toggleJournal(force?: boolean) {
+  const open = force !== undefined ? force : !journalOpen;
+  if (open && uiOpen && !journalOpen) toggleInv(false);
+  journalOpen = open; uiOpen = open; $('journal').classList.toggle('hidden', !open);
+  if (open) { renderJournal(); if (document.exitPointerLock) document.exitPointerLock(); for (const k in keys) keys[k] = false; mouseHeld = false; }
+}
+function showDawn(lines: string[]) {
+  const el = $('dawn'); el.innerHTML = '';
+  lines.forEach((l, i) => { const e = document.createElement(i === 0 ? 'h2' : 'p'); if (i === lines.length - 1) e.className = 'next'; e.textContent = l; el.appendChild(e); });
+  el.classList.add('show'); clearTimeout(dawnTimer); dawnTimer = window.setTimeout(() => el.classList.remove('show'), 9000);
+}
+$('dawn').addEventListener('click', () => $('dawn').classList.remove('show'));
+$('goal').addEventListener('click', () => { if (state === 'play') toggleJournal(); });
+$('jtGoals').addEventListener('click', () => { journalTab = 'goals'; renderJournal(); });
+$('jtLog').addEventListener('click', () => { journalTab = 'log'; renderJournal(); });
+
 /* ================= input ================= */
 const isTouch = matchMedia('(pointer:coarse)').matches;
 const joy: { active: boolean; id: number | null; cx: number; cy: number; x: number; y: number } = { active: false, id: null, cx: 0, cy: 0, x: 0, y: 0 }; let touchRun = false, touchJump = false, touchBlock = false, look: { id: number; x: number; y: number; mouse?: boolean } | null = null;
@@ -980,8 +1051,9 @@ addEventListener('keydown', e => {
   keys[e.code] = true;
   if (['Space', 'Tab', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
   if (state !== 'play' && state !== 'menu') return;
-  if (e.code === 'Tab' || e.code === 'KeyI' || e.code === 'KeyC') { if (state === 'play') toggleInv(); }
-  else if (e.code === 'Escape' && uiOpen) toggleInv(false);
+  if (e.code === 'Tab' || e.code === 'KeyI' || e.code === 'KeyC') { if (state === 'play') { if (journalOpen) toggleJournal(false); else toggleInv(); } }
+  else if (e.code === 'KeyJ') { if (state === 'play') toggleJournal(); }
+  else if (e.code === 'Escape' && uiOpen) { if (journalOpen) toggleJournal(false); else toggleInv(false); }
   else if (e.code === 'KeyE' && state === 'play') interact();
   else if (e.code === 'KeyM') { setMuted(!audioState.muted); }
   else if (e.code === 'BracketRight') camDist = clamp(camDist + 0.8, 3, 14); else if (e.code === 'BracketLeft') camDist = clamp(camDist - 0.8, 3, 14);
@@ -1057,7 +1129,7 @@ function updatePlayer(dt: number) {
   if (ladder && !uiOpen) {
     const up = keys.KeyW || keys.Space || keys.ArrowUp || joy.y > 0.4 || touchJump, dn = keys.KeyS || keys.ArrowDown || joy.y < -0.4;
     if (up || dn) { P.grounded = false; P.vy = up ? 3.8 : -3.8; } else if (!P.grounded) P.vy = 0;
-  } else if ((keys.Space || touchJump) && !uiOpen) { if (wet) { P.vy = 4.6; P.grounded = false; } else if (P.grounded) { P.vy = 11.3; P.grounded = false; sfx.jump(); } }
+  } else if ((keys.Space || touchJump) && !uiOpen) { const feetWet = getBlock(wx, Math.floor(P.y + 0.1), wz) === B.WATER; if (wet) { P.vy = 4.6; P.grounded = false; } else if (feetWet && !P.grounded) { P.vy = len > 0.1 ? 8.6 : 4.6; } else if (P.grounded) { P.vy = 11.3; P.grounded = false; sfx.jump(); } }
   touchJump = false;
   if (P.grounded) { if (S0 < P.y - 0.4) P.grounded = false; else P.y = S0; }
   if (!P.grounded) {
@@ -1168,25 +1240,25 @@ function updateHUD() {
 /* ================= saving ================= */
 const SAVE_KEY = 'thistlewick-save-v1'; let storageOK = false, hasSave = false, saveT = 30;
 try { localStorage.setItem('tw-test', '1'); localStorage.removeItem('tw-test'); storageOK = true; } catch (e) { storageOK = false; }
-function peekSave() { if (!storageOK) return false; try { const d = JSON.parse(localStorage.getItem(SAVE_KEY) || 'null'); return !!d && d.v === 1; } catch (e) { return false; } }
+function peekSave() { if (!storageOK) return false; try { const d = migrateSave(JSON.parse(localStorage.getItem(SAVE_KEY) || 'null')); return !!d; } catch (e) { return false; } }
 function clearSave() { try { localStorage.removeItem(SAVE_KEY); } catch (e) {} }
 function saveGame() {
   if (!storageOK) return false;
   try {
     const e: number[] = []; for (const v of edits.values()) e.push(v.i, v.j, v.k, v.id);
-    const d: SaveV1 = { v: 1, P: { x: P.x, y: P.y, z: P.z, hp: P.hp, hunger: P.hunger, stamina: P.stamina, heading: P.heading, spawnX: P.spawnX, spawnZ: P.spawnZ }, todT, sel, inv: inv.map(s => s ? [s.id, s.n, s.dur] as [string, number, number | undefined] : null), tips, edits: e,
+    const d: SaveV2 = { v: 2, journal: [...progress], P: { x: P.x, y: P.y, z: P.z, hp: P.hp, hunger: P.hunger, stamina: P.stamina, heading: P.heading, spawnX: P.spawnX, spawnZ: P.spawnZ }, todT, sel, inv: inv.map(s => s ? [s.id, s.n, s.dur] as [string, number, number | undefined] : null), tips, edits: e,
       stations: stations.map(b => [b.t, b.i, b.j, b.k]), collected: [...collected], dead: [...deadNodes] };
     localStorage.setItem(SAVE_KEY, JSON.stringify(d)); return true;
   } catch (err) { return false; }
 }
 function loadGame() {
-  let d: SaveV1 | null; try { d = JSON.parse(localStorage.getItem(SAVE_KEY) || 'null'); } catch (e) { return false; } if (!d || d.v !== 1) return false;
+  let d: SaveV2 | null; try { d = migrateSave(JSON.parse(localStorage.getItem(SAVE_KEY) || 'null')); } catch (e) { return false; } if (!d) return false;
   try {
     const p = d.P; P.x = p.x; P.z = p.z; P.y = p.y; P.hp = Math.max(20, p.hp); P.hunger = p.hunger; P.stamina = p.stamina; P.heading = p.heading; P.spawnX = p.spawnX; P.spawnZ = p.spawnZ; P.vx = P.vz = P.vy = 0;
     Object.assign(tips, d.tips || {}); for (const id of d.collected || []) collected.add(id); for (const k of d.dead || []) deadNodes.add(k);
     for (let q = 0; q + 3 < d.edits.length; q += 4) setVox(d.edits[q], d.edits[q + 1], d.edits[q + 2], d.edits[q + 3]);
     inv.fill(null); (d.inv || []).forEach((s, i) => { if (s && ITEMS[s[0]] && i < 24) inv[i] = { id: s[0], n: s[1], dur: s[2] }; });
-    todT = d.todT; sel = (d.sel | 0) % 8;
+    todT = d.todT; sel = (d.sel | 0) % 8; progress.clear(); for (const k of d.journal) progress.add(k); tally = newTally();
     for (const ch of chunks.values()) disposeChunk(ch); chunks.clear();
     ensureChunks(true);
     for (const s of d.stations || []) if (BDEF[s[0]]) placeStation(s[1], s[2], s[3], s[0] as StationKind);
@@ -1203,6 +1275,7 @@ function startGame(fresh: boolean) {
   if (fresh === undefined) fresh = true;
   if (!ready) return; initAudio(); resumeAudio();
   $('start').classList.add('hidden'); $('hud').classList.remove('hidden'); if (isTouch) { $('touch').classList.remove('hidden'); $('xh').classList.add('on'); }
+  progress.add('biome:' + WG.terr(Math.floor(P.x), Math.floor(P.z)).biome); renderGoal();
   state = 'play'; camTarget.set(P.x, P.y + 1.25, P.z); renderHot(); updateHeld();
   if (fresh) setTimeout(() => toast('Punch a tree to gather wood. Walk over sticks, stones and fibre to pick them up.', false, 5200), 500);
   else setTimeout(() => toast('Welcome back', false, 1800), 400);
@@ -1243,7 +1316,8 @@ function frame(now: number) {
   updateCamera(dt, T); sky.position.copy(camera.position);
   { const wetCam = getBlock(Math.floor(camera.position.x), Math.floor(camera.position.y), Math.floor(camera.position.z)) === B.WATER; uwU += ((wetCam ? 1 : 0) - uwU) * Math.min(1, dt * 6);
     const bb = WG.terr(Math.floor(P.x), Math.floor(P.z)).biome; fogD += (FOGT[bb] - fogD) * Math.min(1, dt * 0.4); snowU += ((bb === BIOME.PEAKS || P.y > 30 ? 1 : 0) - snowU) * Math.min(1, dt * 0.8);
-    waterTex.offset.set((T * 0.012) % 1, (T * 0.008) % 1); }
+    waterTex.offset.set((T * 0.012) % 1, (T * 0.008) % 1);
+    if (state === 'play') { note('biome:' + bb); if (ugU > 0.6 && H(P.x, P.z) - P.y >= 4) note('cave'); } }
   if (state === 'play') { computeAim(); }
   updateAimVisuals(); updateShafts(T); updateMotes(dt, T); updateFlies(dt, T); updateParts(dt);
   for (const e of enemies) if (e.bar) e.bar.visible = !e.dying && e.hp < e.max;

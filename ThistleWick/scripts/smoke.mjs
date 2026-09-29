@@ -1,5 +1,5 @@
-// Headless browser smoke test: boots dist/thistlewick.html, starts a game, plays a few seconds, reports console errors.
-// Usage: node scripts/smoke.mjs [html-path] [screenshot-path]
+// Headless browser smoke test: boots dist/thistlewick.html, plays a few seconds, exercises the journal UI and saves,
+// and fails on any console error. Usage: node scripts/smoke.mjs [html-path] [screenshot-path]
 import puppeteer from 'puppeteer-core';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -12,29 +12,67 @@ const browser = await puppeteer.launch({ executablePath: exe, headless: true, ar
 const page = await browser.newPage();
 await page.setViewport({ width: 1100, height: 700 });
 const errors = [];
+const check = (ok, msg) => { if (!ok) errors.push('check failed: ' + msg); };
 page.on('pageerror', e => errors.push('pageerror: ' + e.message));
 page.on('console', m => { if (m.type() === 'error') errors.push('console: ' + m.text()); });
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const ready = () => page.waitForFunction(() => { const b = document.getElementById('goBtn'); return b && !b.disabled; }, { timeout: 90000 });
+const text = sel => page.$eval(sel, e => e.textContent);
+const visible = sel => page.$eval(sel, e => !e.classList.contains('hidden'));
+
 await page.goto(pathToFileURL(html).href, { waitUntil: 'load' });
 await page.evaluate(() => localStorage.clear());
-await page.goto(pathToFileURL(html).href, { waitUntil: 'load' });
-await page.waitForFunction(() => { const b = document.getElementById('goBtn'); return b && !b.disabled; }, { timeout: 90000 });
-const label = await page.$eval('#goBtn', b => b.textContent);
+await page.reload({ waitUntil: 'load' });
+await ready();
+const label = await text('#goBtn');
 await page.click('#goBtn');
 for (const k of ['KeyW', 'KeyD']) await page.keyboard.down(k);
-await new Promise(r => setTimeout(r, 4000));
-await page.keyboard.press('Tab');
-await new Promise(r => setTimeout(r, 500));
-const inv = await page.$eval('#inv', e => !e.classList.contains('hidden'));
+await sleep(4000);
+for (const k of ['KeyW', 'KeyD']) await page.keyboard.up(k);
+
+// goal panel and journal overlay
+const goalStep = await text('#goalStep');
+check(goalStep === 'Punch a tree to gather wood', 'first goal is "' + goalStep + '"');
+await page.keyboard.press('KeyJ');
+await sleep(300);
+check(await visible('#journal'), 'J opens the journal');
+const arcs = await page.$$eval('.arc', a => a.length);
+check(arcs === 3, 'three arcs shown, got ' + arcs);
+await page.click('#jtLog');
+const logCount = await text('#jCount');
+check(/^\d+\/\d+$/.test(logCount), 'log count "' + logCount + '"');
 await page.screenshot({ path: shot });
-const hud = await page.$eval('#clockS', e => e.textContent);
-// save round trip: pagehide saves, a reload must offer Continue
+await page.keyboard.press('Escape');
+await sleep(200);
+check(!(await visible('#journal')), 'Escape closes the journal');
+
+// pack still works, and Tab closes the journal instead of stacking
 await page.keyboard.press('Tab');
+await sleep(300);
+const invOpen = await visible('#inv');
+check(invOpen, 'Tab opens the pack');
+await page.keyboard.press('Tab');
+
+// save round trip (v2), then a v1 save must still load
 await page.evaluate(() => window.dispatchEvent(new Event('pagehide')));
-const saved = await page.evaluate(() => { const d = JSON.parse(localStorage.getItem('thistlewick-save-v1') || 'null'); return d ? { v: d.v, inv: d.inv.length, hasP: !!d.P } : null; });
+const saved = await page.evaluate(() => { const d = JSON.parse(localStorage.getItem('thistlewick-save-v1') || 'null'); return d ? { v: d.v, inv: d.inv.length, journal: Array.isArray(d.journal) ? d.journal.length : -1 } : null; });
+check(saved && saved.v === 2 && saved.journal >= 1, 'save is v2 with a journal: ' + JSON.stringify(saved));
 await page.reload({ waitUntil: 'load' });
-await page.waitForFunction(() => { const b = document.getElementById('goBtn'); return b && !b.disabled; }, { timeout: 90000 });
-const label2 = await page.$eval('#goBtn', b => b.textContent);
-if (label2 !== 'Continue' || !saved) errors.push('save round trip failed: ' + JSON.stringify({ saved, label2 }));
-console.log(JSON.stringify({ label, invOpen: inv, hud, saved, label2, errors }, null, 1));
+await ready();
+const label2 = await text('#goBtn');
+check(label2 === 'Continue', 'reload offers Continue, got ' + label2);
+
+await page.evaluate(() => {
+  const d = JSON.parse(localStorage.getItem('thistlewick-save-v1'));
+  delete d.journal; d.v = 1; d.inv[0] = ['wood', 5, undefined]; localStorage.setItem('thistlewick-save-v1', JSON.stringify(d));
+});
+await page.reload({ waitUntil: 'load' });
+await ready();
+await page.click('#goBtn');
+await sleep(1500);
+const goalAfterV1 = await text('#goalStep');
+check(goalAfterV1 !== 'Punch a tree to gather wood', 'v1 save infers progress, goal is "' + goalAfterV1 + '"');
+
+console.log(JSON.stringify({ label, goalStep, arcs, logCount, invOpen, saved, label2, goalAfterV1, errors }, null, 1));
 await browser.close();
 process.exit(errors.length ? 1 : 0);

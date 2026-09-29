@@ -38,14 +38,3 @@ export interface Aim {
 export interface ToolStats { d: import('./items').ItemDef | null; s?: Slot | null; chop: number; mine: number; dmg: number; range: number; blockPow: number }
 export interface Particle { life: number; x: number; y: number; z: number; vx: number; vy: number; vz: number; s: number }
 
-/** localStorage save, schema v1. Terrain is deterministic, so only the player's changes are stored. */
-export interface SaveV1 {
-  v: 1;
-  P: { x: number; y: number; z: number; hp: number; hunger: number; stamina: number; heading: number; spawnX: number; spawnZ: number };
-  todT: number; sel: number;
-  inv: ([string, number, number | undefined] | null)[];
-  tips: Record<string, number>;
-  edits: number[];
-  stations: [string, number, number, number][];
-  collected: string[]; dead: string[];
-}
