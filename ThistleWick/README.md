@@ -31,6 +31,12 @@ Open `index.html` (uses `dist/game.js`) or `dist/thistlewick.html` in a browser,
 - `genChunk()`     ore rarity, crystal density, lava depth (`LAVA_Y`), sea level (`SEA`).
 - `S`, `JMIN`, `JMAX` chunk size and world height range.
 
+## World identity and generator versions (`src/world/seed.ts`)
+A save records `worldSeed` and `genVersion`. The world is the seed run through the generator, plus the player's changes (`edits`, `collected`, `dead`) stored on top.
+- Seed 0 is the original world and must stay bit-identical (the parity tests enforce it). New worlds get a random seed.
+- Scenery in generator v2 draws each spawn attempt of a persisted kind (trees, rocks, ore, bushes, pickups) from its own stream, so its ids survive edits elsewhere in `genChunk`. v1 keeps the old shared stream for old saves.
+- **Any change that alters what an existing world generates must bump `GEN_VERSION` and be gated on `world.genVersion`**, otherwise old saves reshuffle under the player's edits. A save from a newer generator than the build knows is not loaded.
+
 ## Adding a block
 1. Add an id to `B` in `world/worldgen.ts`.
 2. Paint a tile in `makeVoxelAtlas()` (`render/textures.ts`) and add it to `TL` in `items.ts`.

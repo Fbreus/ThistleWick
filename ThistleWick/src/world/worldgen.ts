@@ -1,5 +1,6 @@
 /* Thistlewick world generation. Pure TypeScript, no dependencies, works in the browser and in node.
    Terrain, biomes, mountains, lakes, caves, ores and lava. Chunks are S x S columns, HL cells tall. */
+import { salt, setWorldParams } from './seed';
 const S = 40, JMIN = -32, JMAX = 88, HL = JMAX - JMIN, SEA = -3, LAVA_Y = -25, SS = S * S;
 const B = { AIR: 0, GRASS: 1, DIRT: 2, STONE: 3, IRON: 4, COAL: 5, BEDROCK: 6, SAND: 7, SANDSTONE: 8, SNOW: 9, GRAVEL: 10, MEADOW: 11, WATER: 12, LAVA: 13, CRYSTAL: 14, PLANK: 15, BRICK: 16 };
 const BIOME = { FOREST: 0, MEADOW: 1, HIGHLAND: 2, DUNES: 3, MARSH: 4, PEAKS: 5 };
@@ -7,11 +8,11 @@ const BIOME_NAME = ['Autumn forest', 'Meadow', 'Highlands', 'Dunes', 'Marsh', 'S
 
 const smooth = (a: number, b: number, x: number) => { const t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
 function hash2(x: number, y: number, s?: number) {
-  let h = Math.imul(x | 0, 374761393) ^ Math.imul(y | 0, 668265263) ^ Math.imul((s || 0) | 0, 1442695041);
+  let h = Math.imul(x | 0, 374761393) ^ Math.imul(y | 0, 668265263) ^ Math.imul(((s || 0) | 0) ^ salt.mix, 1442695041);
   h = Math.imul(h ^ (h >>> 13), 1274126177); h ^= h >>> 16; return (h >>> 0) / 4294967296;
 }
 function hash3(x: number, y: number, z: number, s?: number) {
-  let h = Math.imul(x | 0, 374761393) ^ Math.imul(y | 0, 668265263) ^ Math.imul(z | 0, 1911520717) ^ Math.imul((s || 0) | 0, 1442695041);
+  let h = Math.imul(x | 0, 374761393) ^ Math.imul(y | 0, 668265263) ^ Math.imul(z | 0, 1911520717) ^ Math.imul(((s || 0) | 0) ^ salt.mix, 1442695041);
   h = Math.imul(h ^ (h >>> 13), 1274126177); h ^= h >>> 16; return (h >>> 0) / 4294967296;
 }
 function vnoise(x: number, y: number, s: number) {
@@ -54,6 +55,8 @@ function terr(i: number, k: number) {
   else if (moist < 0.3) biome = BIOME.MEADOW;
   t = { h, biome, mm }; tc.set(kk, t); return t;
 }
+/** Switches the generator to another world. Terrain is cached per column, so the cache goes with the seed. */
+function setWorld(seed: number, genVersion: number) { setWorldParams(seed, genVersion); tc.clear(); }
 function slope(i: number, k: number) { const h = terr(i, k).h; return Math.max(Math.abs(h - terr(i + 1, k).h), Math.abs(h - terr(i - 1, k).h), Math.abs(h - terr(i, k + 1).h), Math.abs(h - terr(i, k - 1).h)); }
 
 /* ---- caves: winding tunnels (two noise bands crossing) plus big chambers ---- */
@@ -116,7 +119,7 @@ function genChunk(cx: number, cz: number) {
   }
   return { cx, cz, data, hi, bio, tops };
 }
-export const WG = { S, JMIN, JMAX, HL, SS, SEA, LAVA_Y, B, BIOME, BIOME_NAME, terr, slope, genChunk, smooth, hash2, hash3, vnoise, vnoise3, fbm };
+export const WG = { S, JMIN, JMAX, HL, SS, SEA, LAVA_Y, B, BIOME, BIOME_NAME, terr, slope, genChunk, setWorld, smooth, hash2, hash3, vnoise, vnoise3, fbm };
 export type WorldGen = typeof WG;
 export type ChunkData = ReturnType<typeof genChunk>;
 export type Terrain = ReturnType<typeof terr>;

@@ -1,18 +1,19 @@
 /** Collection log: everything the player can discover, derived from the same progress keys as the journal. */
 import { ITEMS } from '../items';
 import { WG } from '../world/worldgen';
+import { RESIDENTS } from './dialogue';
 import type { Progress } from './journal';
 
 export type LogSection = 'items' | 'places' | 'creatures';
 export interface LogEntry { key: string; name: string; section: LogSection; icon?: string }
 
-export const CREATURES: { id: string; name: string }[] = [{ id: 'beetle', name: 'Gloom beetle' }, { id: 'hare', name: 'Thistle hare' }];
+export const CREATURES: { id: string; name: string }[] = [{ id: 'beetle', name: 'Gloom beetle' }, { id: 'hare', name: 'Thistle hare' }, { id: 'elder', name: 'Elder Beetle' }];
 
 export function logEntries(): LogEntry[] {
   const items: LogEntry[] = Object.values(ITEMS).map(d => ({ key: 'got:' + d.id, name: d.n, section: 'items', icon: d.id }));
   const places: LogEntry[] = WG.BIOME_NAME.map((n, i) => ({ key: 'biome:' + i, name: n, section: 'places' }));
   places.push({ key: 'cave', name: 'The caves', section: 'places' });
-  const creatures: LogEntry[] = CREATURES.map(c => ({ key: 'kill:' + c.id, name: c.name, section: 'creatures' }));
+  const creatures: LogEntry[] = [...CREATURES.map(c => ({ key: 'kill:' + c.id, name: c.name, section: 'creatures' as const })), ...Object.values(RESIDENTS).map(r => ({ key: 'resident:' + r.id, name: r.name + ' the ' + r.title, section: 'creatures' as const }))];
   return [...items, ...places, ...creatures];
 }
 

@@ -31,6 +31,7 @@ export const sfx = {
   clang() { tone(900, 600, 0.18, 'square', 0.1); tone(1350, 900, 0.2, 'sine', 0.12); }, bite() { noiseBurst(0.1, 1800, 0.4, 2); },
   squish() { tone(180, 60, 0.18, 'sawtooth', 0.12); noiseBurst(0.12, 500, 0.3); }, brk() { noiseBurst(0.25, 450, 0.6, 0.6); tone(120, 60, 0.2, 'triangle', 0.3); },
   chirp() { for (let i = 0; i < 4; i++) tone(4300, 4300, 0.035, 'sine', 0.02, i * 0.07); },
+  hum() { tone(118, 124, 0.8, 'sine', 0.045); tone(236, 248, 0.7, 'sine', 0.018, 0.05); },
   growl() { tone(90, 60, 0.4, 'sawtooth', 0.09); }, hoot() { tone(390, 350, 0.4, 'sine', 0.14); tone(390, 340, 0.5, 'sine', 0.14, 0.55); }
 };
 export const audioReady = () => !!AC;

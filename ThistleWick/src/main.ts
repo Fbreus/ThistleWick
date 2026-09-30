@@ -6,16 +6,26 @@ import { $, ctx2d } from './dom';
 import { renderer, scene, camera, hemi, sun, lantern, fireLights, U, composer, bloom, grade, view, canvas, tex, MAT } from './render/gfx';
 import { G, mergeGeos, mat4 } from './render/geometry';
 import type { Recipe, StationKind } from './items';
-import type { Slot, Station, Edit, Chunk, MeshBuf, Reader, Rgb, SceneNode, Collider, Pickup, Instance, Enemy, Critter, Aim, ToolStats, Particle } from './types';
-import { migrateSave, type SaveV2 } from './save';
+import type { Slot, Station, Edit, Chunk, MeshBuf, Reader, Rgb, SceneNode, Collider, Pickup, Instance, Enemy, Critter, Aim, ToolStats, Particle, Resident, StorySitePart } from './types';
+import { createStorySave, migrateSave, type SaveV5, type StorySave } from './save';
+import { createStore, localBackend, idbBackend, type Backend } from './storage';
+import { encode, decode, compact, summarize, type WorldEvent, type Cause } from './systems/chronicle';
+import { world, salt, GEN_VERSION, randomSeed, attemptSeed } from './world/seed';
 import { ARCS, createProgress, record, nextStep, completedBy, arcProgress, stepDone } from './systems/journal';
 import { logEntries, logCounts, discoveryName } from './systems/discoveries';
 import { newTally, tallyAdd, dawnLines } from './systems/dawn';
+import { BOSS_DAMAGE, BOSS_HP, BOSS_NAME, BOSS_SCALE, CHARGE_SPEED, WINDUP, damageMult, newBoss, shouldSpawn, speedOf, stepBoss } from './systems/boss';
+import { RESIDENTS, candidateLines, newFriend, pickLine, presentFor, talk as talkStep, giveGift, tierOf, TIER_NAMES, type Friend } from './systems/dialogue';
+import { QUESTS, acceptQuest, availableQuests, currentObjectives, currentStage, questById, questStatus, recordQuestEvent, residentConversation, type ConversationCue, type ItemCost } from './systems/quests';
+import { LORE, loreById } from './systems/lore';
+import { beetleWardRadius } from './systems/light';
+import { findRoom, checkCottage, floorCells, startsNear, type Cell, type RoomQuery } from './systems/homestead';
 import { STAGE_NAMES, advanceCrops, cropStage, grow, harvestYield, isRipe, isSoil, nearWater } from './systems/garden';
 import type { ChunkData } from './world/worldgen';
 import { ITEMS, BDEF, BLOCK, TL, SOLIDB, OPQ, BCOL, RECIPES, STN, TIERN, DMG, CHOP, MINE, DIGP, BLOCKR } from './items';
 import { icon } from './icons';
 import { sfx, initAudio, setMuted, audioState, audioReady, resumeAudio } from './audio';
+import { navigationTo, nearStorySite, storySites as makeStorySites, type StorySite } from './world/story-sites';
 const { ground, atlasTex, waterTex, glowWarm, glowRed, moteTex, shaftTex } = tex;
 const { JMIN, JMAX, SEA, LAVA_Y, B, BIOME } = WG;
 const dummy = new THREE.Object3D(), tmpN = new THREE.Vector3(), tmpQ = new THREE.Quaternion(), yawQ = new THREE.Quaternion(), tiltQ = new THREE.Quaternion();
@@ -24,6 +34,8 @@ const H = (x: number, z: number) => WG.terr(Math.floor(x), Math.floor(z)).h;
 /* World data lives in WG (worldgen.js): chunks of 1x1x1 blocks with biomes, mountains, lakes and caves. */
 function baseH(x: number, z: number, r: number) { return Math.min(H(x - r, z - r), H(x + r, z - r), H(x - r, z + r), H(x + r, z + r)); }
 function N(x: number, z: number, out: THREE.Vector3) { return out.set(0, 1, 0); }
+
+let story: StorySave = createStorySave(false), loreSites: StorySite[] = [];
 
 /* ================= inventory ================= */
 const inv: (Slot | null)[] = new Array(24).fill(null);
@@ -77,6 +89,7 @@ function renderInv() {
   }
   const list = $('recipes'), keep = list.scrollTop; list.innerHTML = ''; let cat = '';
   for (const r of RECIPES) {
+    if (r.unlock && !story.recipes.includes(r.unlock)) continue;
     if (r.cat !== cat) { cat = r.cat; const h = document.createElement('h3'); h.textContent = cat; list.appendChild(h); }
     const stOK = !r.st || stationNear(r.st); let haveAll = true, txt = '';
     for (const k in r.in) { const have = countItem(k), ok = have >= r.in[k]; if (!ok) haveAll = false; txt += '<i class="' + (ok ? 'have' : 'lack') + '">' + ITEMS[k].n + ' ' + Math.min(have, 99) + '/' + r.in[k] + '</i>'; }
@@ -117,11 +130,22 @@ function getBlock(i: number, j: number, k: number) {
   if (cx !== gcx || cz !== gcz) { gd = cdata(cx, cz).data; gcx = cx; gcz = cz; }
   return gd![(j - JMIN) * SS + (k - (cz * S - S / 2)) * S + (i - (cx * S - S / 2))];
 }
-function setVox(i: number, j: number, k: number, id: number) {
+/** Every terrain change, oldest first. The edits map is the replayed current state; this is the history behind it. */
+let chronicle: WorldEvent[] = [];
+const sinceDawn: WorldEvent[] = [];   // what changed since the player last slept, for the dawn card
+const MAX_EVENTS = 60000;
+/** Changes a voxel without recording it: used when replaying a saved chronicle. */
+function applyVox(i: number, j: number, k: number, id: number) {
   if (j < JMIN || j >= JMAX) return;
   const cx = Math.floor((i + S / 2) / S), cz = Math.floor((k + S / 2) / S), d = cdata(cx, cz), li = i - (cx * S - S / 2), lk = k - (cz * S - S / 2);
   d.data[(j - JMIN) * SS + lk * S + li] = id; if (id !== 0 && j > d.hi[lk * S + li]) d.hi[lk * S + li] = j; edits.set(key(i, j, k), { i, j, k, id });
   for (let di = (li === 0 ? -1 : 0); di <= (li === S - 1 ? 1 : 0); di++) for (let dk = (lk === 0 ? -1 : 0); dk <= (lk === S - 1 ? 1 : 0); dk++) { const ch = chunks.get((cx + di) + ',' + (cz + dk)); if (ch) ch.dirty = true; }
+}
+function setVox(i: number, j: number, k: number, id: number, cause?: Cause) {
+  if (j < JMIN || j >= JMAX) return;
+  applyVox(i, j, k, id);
+  const e: WorldEvent = { day: Math.floor(todT / DAY_LEN) + 1, cause: cause ?? (id === 0 ? 'dug' : 'placed'), i, j, k, id };
+  chronicle.push(e); sinceDawn.push(e);
 }
 function solid(i: number, j: number, k: number) { if (SOLIDB[getBlock(i, j, k)]) return true; if (blocks.size) { const b = blocks.get(key(i, j, k)); return !!b && !b.ns; } return false; }
 /* standing height of a column: first free cell above solid ground, honouring dug holes and built blocks */
@@ -154,6 +178,19 @@ function buildStation(t: string) {
     const stick = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.05, 0.7, 6), std(0x6b4526)); stick.position.y = 0.35; stick.castShadow = true; g.add(stick);
     const fl = new THREE.Mesh(new THREE.ConeGeometry(0.1, 0.3, 6), new THREE.MeshBasicMaterial({ color: 0xffc060, transparent: true, opacity: 0.95, blending: THREE.AdditiveBlending, depthWrite: false })); fl.position.y = 0.86; g.add(fl); g.userData.flames = [fl, fl];
     const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowWarm, blending: THREE.AdditiveBlending, transparent: true, depthWrite: false, opacity: 0.9 })); sp.scale.setScalar(1.2); sp.position.y = 0.88; g.add(sp); g.userData.glowSp = sp;
+  } else if (t === 'lantern') {
+    const iron = std(0x555b60, 0.35, 0.8), warm = std(0x8a5a2a, 0.7), crystal = new THREE.MeshStandardMaterial({ color: 0x9defff, emissive: 0x36b8d8, emissiveIntensity: 1.5, roughness: 0.25 });
+    box(0.5, 0.08, 0.5, iron, 0, 0.08, 0); box(0.42, 0.08, 0.42, warm, 0, 0.72, 0);
+    for (const [x, z] of [[-0.2, -0.2], [0.2, -0.2], [-0.2, 0.2], [0.2, 0.2]]) box(0.045, 0.62, 0.045, iron, x, 0.4, z);
+    const core = new THREE.Mesh(new THREE.OctahedronGeometry(0.2, 0), crystal); core.position.y = 0.4; g.add(core); g.userData.core = core;
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(0.2, 0.025, 6, 16), iron); ring.position.y = 0.86; ring.rotation.x = Math.PI / 2; g.add(ring);
+    const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowWarm, color: 0x70e8ff, blending: THREE.AdditiveBlending, transparent: true, depthWrite: false, opacity: 0.8 })); sp.scale.setScalar(2.2); sp.position.y = 0.42; g.add(sp); g.userData.glowSp = sp;
+  } else if (t === 'door') {
+    const pivot = new THREE.Group(); pivot.position.set(-0.5, 0, 0); g.add(pivot);
+    const panel = new THREE.Mesh(new THREE.BoxGeometry(1.0, 1.9, 0.1), std(0x9a6a3a)); panel.position.set(0.5, 0.95, 0); panel.castShadow = true; panel.receiveShadow = true; pivot.add(panel);
+    for (const y of [0.35, 1.55]) { const band = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.1, 0.12), std(0x6b4526)); band.position.set(0.5, y, 0); pivot.add(band); }
+    const knob = new THREE.Mesh(new THREE.SphereGeometry(0.06, 8, 6), std(0xd9b04a, 0.3, 0.7)); knob.position.set(0.85, 0.95, 0.09); pivot.add(knob);
+    g.userData.pivot = pivot;
   } else if (t === 'bed') {
     box(0.98, 0.3, 0.98, std(0x8a5a2a), 0, 0.15, 0); box(0.92, 0.18, 0.92, std(0xd9d2c0), 0, 0.39, 0); box(0.92, 0.1, 0.6, std(0xb7362d), 0, 0.5, -0.16); box(0.7, 0.14, 0.26, std(0xf4efe4), 0, 0.53, 0.34);
   }
@@ -172,6 +209,12 @@ function setCropVisual(b: Station) {
   for (let q = 0; q < n; q++) { const a = q / n * TAU + 0.4; add(new THREE.ConeGeometry(0.07, h, 5), q % 2 ? cropMat.leaf : cropMat.leaf2, Math.cos(a) * 0.1, 0.1 + h / 2, Math.sin(a) * 0.1, Math.sin(a) * 0.3, -Math.cos(a) * 0.3); }
   if (stage === 3) add(new THREE.SphereGeometry(0.15, 8, 6), cropMat.root, 0, 0.16, 0);
 }
+/** Doors are two blocks tall: the bottom station owns the model, the top is a linked marker so both cells block movement. */
+function toggleDoor(b: Station) {
+  b.open = !b.open; b.ns = b.open; if (b.top) b.top.ns = b.open;
+  if (b.obj) (b.obj.userData.pivot as THREE.Group).rotation.y = b.open ? -Math.PI / 2 : 0;
+  sfx.place();
+}
 /** Crops are stations that cannot be walked into, so they reuse placement, aiming and breaking. */
 function cropStations() { return stations.filter(b => b.t === 'crop'); }
 function harvestCrop(b: Station) {
@@ -182,9 +225,10 @@ function placeStation(i: number, j: number, k: number, t: StationKind, growth = 
   const b: Station = { t, i, j, k, hp: BDEF[t].hp, obj: null, ns: !!BDEF[t].ns }; blocks.set(key(i, j, k), b);
   const o = buildStation(t); o.position.set(i + 0.5, j, k + 0.5); o.rotation.y = Math.round(Math.atan2(P.x - (i + 0.5), P.z - (k + 0.5)) / (Math.PI / 2)) * Math.PI / 2; scene.add(o); b.obj = o; stations.push(b);
   if (t === 'crop') { b.growth = growth; b.wet = nearWater(getBlock, i, j, k); setCropVisual(b); }
+  if (t === 'door') { const top: Station = { t: 'door', i, j: j + 1, k, hp: b.hp, obj: null, ns: false, link: b }; b.top = top; b.open = false; blocks.set(key(i, j + 1, k), top); }
   return b;
 }
-function removeStation(b: Station) { blocks.delete(key(b.i, b.j, b.k)); if (b.obj) scene.remove(b.obj); const ix = stations.indexOf(b); if (ix >= 0) stations.splice(ix, 1); }
+function removeStation(b0: Station) { const b = b0.link ?? b0; blocks.delete(key(b.i, b.j, b.k)); if (b.top) blocks.delete(key(b.top.i, b.top.j, b.top.k)); if (b.obj) scene.remove(b.obj); const ix = stations.indexOf(b); if (ix >= 0) stations.splice(ix, 1); }
 function pushFromBlocks(o: { x: number; z: number }, r: number, yb: number, yt: number) {
   const i0 = Math.floor(o.x - r), i1 = Math.floor(o.x + r), k0 = Math.floor(o.z - r), k1 = Math.floor(o.z + r), j0 = Math.floor(yb), j1 = Math.floor(yt - 0.001);
   for (let i = i0; i <= i1; i++) for (let k = k0; k <= k1; k++) for (let j = j0; j <= j1; j++) {
@@ -294,7 +338,7 @@ function buildGround(ch: Chunk) {
 }
 
 /* ================= chunks: scenery, nodes and pickups on top of the voxel meshes ================= */
-const deadNodes = new Set<string>(), nk = (n: SceneNode) => n.x.toFixed(1) + ',' + n.z.toFixed(1);
+const deadNodes = new Set<string>(), nk = (n: SceneNode) => n.key ?? n.x.toFixed(1) + ',' + n.z.toFixed(1);
 const chunks = new Map<string, Chunk>(), collected = new Set<string>(), ZERO = new THREE.Matrix4().makeScale(0, 0, 0);
 const GT = [[1, 1, 1], [0.9, 1.25, 0.72], [0.85, 1.0, 0.85], [1.3, 1.1, 0.6], [0.65, 0.92, 0.6], [1, 1, 1]];
 /* weight per biome: forest, meadow, highland, dunes, marsh, peaks */
@@ -305,14 +349,18 @@ const W = {
 };
 function changedTop(i: number, k: number, h: number) { return !SOLIDB[getBlock(i, h - 1, k)] || getBlock(i, h, k) !== 0; }
 function genChunk(cx: number, cz: number) {
-  const R = mulberry32(Math.imul(cx, 73856093) ^ Math.imul(cz, 19349663) ^ 0x9e3779b9);
+  const chunkR = mulberry32(Math.imul(cx, 73856093) ^ Math.imul(cz, 19349663) ^ 0x9e3779b9 ^ salt.mix);
+  /* generator v2: each spawn attempt of a persisted kind draws from its own stream, so ids survive edits elsewhere in this function */
+  let R = chunkR; const v2 = world.genVersion >= 2;
+  const attempt = (tag: string, a: number) => { if (v2) R = mulberry32(attemptSeed(cx, cz, tag, a)); };
+  const spawnKey = (tag: string, a: number) => v2 ? cx + ',' + cz + ',' + tag + a : undefined;
   const x0 = cx * S - S / 2, z0 = cz * S - S / 2, grp = new THREE.Group();
   const ch: Chunk = { cx, cz, grp, col: [], nodes: [], picks: [], disp: [], scen: [], dirty: false, gm: { top: null, atlas: null, glow: null, water: null } };
   const rx = () => x0 + R() * S, rz = () => z0 + R() * S, home = (x: number, z: number, r: number) => Math.hypot(x, z) < r;
   const bioAt = (x: number, z: number) => WG.terr(Math.floor(x), Math.floor(z)).biome;
   const wOK = (w: number[], x: number, z: number) => R() < w[bioAt(x, z)];
   const walk = (x: number, z: number) => { const i = Math.floor(x), k = Math.floor(z), t = WG.terr(i, k); return t.h > SEA + 1 && WG.slope(i, k) < 3; };
-  const blocked = (x: number, z: number, pad: number) => { if (!walk(x, z)) return true; for (const c of ch.col) if (Math.hypot(x - c.x, z - c.z) < c.r + pad) return true; return false; };
+  const blocked = (x: number, z: number, pad: number) => { if (!walk(x, z) || (world.genVersion >= 3 && nearStorySite(loreSites, x, z, pad))) return true; for (const c of ch.col) if (Math.hypot(x - c.x, z - c.z) < c.r + pad) return true; return false; };
   const align = (x: number, z: number, yaw: number, off: number, sx: number, sy: number, sz: number) => { dummy.quaternion.setFromAxisAngle(UP, yaw); dummy.position.set(x, H(x, z) + off, z); dummy.scale.set(sx, sy, sz); dummy.updateMatrix(); return dummy.matrix.clone(); };
   const flush = (list: Instance[], geo: THREE.BufferGeometry, mat: THREE.Material, cast: boolean) => {
     if (!list.length) return null;
@@ -327,7 +375,7 @@ function genChunk(cx: number, cz: number) {
   /* giant ancient trunks and fallen logs */
   if (R() < 0.7) {
     const tx = x0 + 9 + R() * (S - 18), tz = z0 + 9 + R() * (S - 18), r = 4.5 + R() * 4;
-    if (Math.hypot(tx, tz) > 18 && wOK(W.giant, tx, tz) && walk(tx, tz)) {
+    if (Math.hypot(tx, tz) > 18 && wOK(W.giant, tx, tz) && walk(tx, tz) && !nearStorySite(loreSites, tx, tz, r)) {
       let y0 = 1e9; for (let k = 0; k < 8; k++) y0 = Math.min(y0, H(tx + Math.cos(k * 0.785) * r, tz + Math.sin(k * 0.785) * r));
       const m = new THREE.Mesh(G.giant[(R() * 3) | 0], MAT.vc); m.position.set(tx, y0 - 0.3, tz); m.scale.set(r, 1, r); m.rotation.y = R() * TAU; m.castShadow = true; m.receiveShadow = true; grp.add(m);
       ch.col.push({ x: tx, z: tz, r: r * 1.12 });
@@ -346,39 +394,48 @@ function genChunk(cx: number, cz: number) {
   /* choppable trees, by biome */
   const forest = (x: number, z: number) => 0.3 + 0.7 * smooth(0.3, 0.6, fbm(x * 0.02, z * 0.02, 2, 71));
   for (let a = 0; a < 18; a++) {
+    attempt('tree', a);
     const x = rx(), z = rz(); if (!wOK(W.tree, x, z) || R() > forest(x, z) * 0.85) continue;
     const r = 0.42 + R() * 0.45; if (home(x, z, 7) || blocked(x, z, r + 1.5)) continue;
     const b = bioAt(x, z), v = b === BIOME.HIGHLAND ? (R() < 0.5 ? 0 : 1) : b === BIOME.MEADOW ? 4 : b === BIOME.MARSH ? (R() < 0.5 ? 2 : 4) : (R() * G.trees.length) | 0;
     const m = new THREE.Mesh(G.trees[v], MAT.vc), by = baseH(x, z, r);
     m.position.set(x, by - 0.25, z); m.scale.setScalar(r); m.rotation.y = R() * TAU; m.castShadow = true; m.receiveShadow = true; grp.add(m);
-    const node: SceneNode = { kind: 'tree', x, z, y0: by, r, h: (v < 2 ? 22 : 16) * r, hp: 9 + r * 8, max: 9 + r * 8, yield: Math.round(2 + r * 5), mesh: m, dead: false, shake: 0, ry: m.rotation.y };
+    const node: SceneNode = { kind: 'tree', x, z, y0: by, r, h: (v < 2 ? 22 : 16) * r, hp: 9 + r * 8, max: 9 + r * 8, yield: Math.round(2 + r * 5), mesh: m, dead: false, shake: 0, ry: m.rotation.y, key: spawnKey('tree', a) };
     ch.nodes.push(node); ch.col.push({ x, z, r: r * 1.05, node });
   }
+  R = chunkR;
   for (let a = 0; a < 8; a++) {
+    attempt('cactus', a);
     const x = rx(), z = rz(); if (!wOK(W.cactus, x, z)) continue; const r = 0.38 + R() * 0.22; if (blocked(x, z, r + 2)) continue;
     const m = new THREE.Mesh(G.cactus, MAT.vc), by = baseH(x, z, r); m.position.set(x, by - 0.1, z); m.scale.setScalar(r); m.rotation.y = R() * TAU; m.castShadow = true; m.receiveShadow = true; grp.add(m);
-    const node: SceneNode = { kind: 'tree', cactus: true, item: 'fiber', x, z, y0: by, r: r * 1.1, h: 5 * r, hp: 5 + r * 5, max: 5 + r * 5, yield: 2 + ((R() * 3) | 0), mesh: m, dead: false, shake: 0, ry: m.rotation.y };
+    const node: SceneNode = { kind: 'tree', cactus: true, item: 'fiber', x, z, y0: by, r: r * 1.1, h: 5 * r, hp: 5 + r * 5, max: 5 + r * 5, yield: 2 + ((R() * 3) | 0), mesh: m, dead: false, shake: 0, ry: m.rotation.y, key: spawnKey('cactus', a) };
     ch.nodes.push(node); ch.col.push({ x, z, r: r * 1.15, node });
   }
+  R = chunkR;
   /* stone and iron outcrops */
   for (let a = 0; a < 3; a++) {
+    attempt('rock', a);
     const x = rx(), z = rz(), s = 0.9 + R() * 0.7; if (!wOK(W.rock, x, z) || home(x, z, 8) || blocked(x, z, s + 1.2)) continue;
     const by = baseH(x, z, s * 0.9), m = new THREE.Mesh(G.rockNode[(R() * 2) | 0], bioAt(x, z) === BIOME.DUNES ? MAT.vcTan : MAT.vc); m.position.set(x, by + s * 0.1, z); m.scale.set(s, s * 0.85, s); m.rotation.y = R() * TAU; m.castShadow = true; m.receiveShadow = true; grp.add(m);
-    const node: SceneNode = { kind: 'rock', x, z, y0: by, r: s * 0.95, h: s * 1.4, hp: 13, max: 13, yield: 3 + ((R() * 3) | 0), mesh: m, dead: false, shake: 0, ry: m.rotation.y, sc: s };
+    const node: SceneNode = { kind: 'rock', x, z, y0: by, r: s * 0.95, h: s * 1.4, hp: 13, max: 13, yield: 3 + ((R() * 3) | 0), mesh: m, dead: false, shake: 0, ry: m.rotation.y, sc: s, key: spawnKey('rock', a) };
     ch.nodes.push(node); ch.col.push({ x, z, r: s * 0.9, node });
   }
-  { const x = rx(), z = rz(), s = 0.9 + R() * 0.4;
+  R = chunkR;
+  { attempt('ore', 0); const x = rx(), z = rz(), s = 0.9 + R() * 0.4;
     if (R() < W.ore[bioAt(x, z)] && !home(x, z, 10) && !blocked(x, z, s + 1.2)) {
       const by = baseH(x, z, s * 0.9), m = new THREE.Mesh(G.oreNode, MAT.ore); m.position.set(x, by + s * 0.1, z); m.scale.set(s, s * 0.9, s); m.rotation.y = R() * TAU; m.castShadow = true; m.receiveShadow = true; grp.add(m);
-      const node: SceneNode = { kind: 'ore', x, z, y0: by, r: s * 0.95, h: s * 1.4, hp: 18, max: 18, yield: 1 + ((R() * 3) | 0), mesh: m, dead: false, shake: 0, ry: m.rotation.y, sc: s };
+      const node: SceneNode = { kind: 'ore', x, z, y0: by, r: s * 0.95, h: s * 1.4, hp: 18, max: 18, yield: 1 + ((R() * 3) | 0), mesh: m, dead: false, shake: 0, ry: m.rotation.y, sc: s, key: spawnKey('ore', 0) };
       ch.nodes.push(node); ch.col.push({ x, z, r: s * 0.9, node });
     }
+    R = chunkR;
   }
   for (let a = 0; a < 3; a++) {
+    attempt('bush', a);
     const x = rx(), z = rz(), s = 0.9 + R() * 0.5; if (!wOK(W.bush, x, z) || home(x, z, 5) || blocked(x, z, s + 0.6)) continue;
     const m = new THREE.Mesh(G.bushBerry, MAT.vc); m.position.set(x, baseH(x, z, s * 0.9) - 0.05, z); m.scale.setScalar(s); m.rotation.y = R() * TAU; m.castShadow = true; m.receiveShadow = true; grp.add(m);
-    ch.nodes.push({ kind: 'bush', x, z, y0: baseH(x, z, s * 0.9), r: s * 1.0, h: s * 1.3, hp: 1, max: 1, mesh: m, dead: false, shake: 0, ready: true, regrow: 0, sc: s, id: cx + ',' + cz + ',bush' + a });
+    ch.nodes.push({ kind: 'bush', x, z, y0: baseH(x, z, s * 0.9), r: s * 1.0, h: s * 1.3, hp: 1, max: 1, mesh: m, dead: false, shake: 0, ready: true, regrow: 0, sc: s, id: cx + ',' + cz + ',bush' + a, key: spawnKey('bush', a) });
   }
+  R = chunkR;
 
   /* scenery */
   { const lists: Instance[][] = [[], []];
@@ -435,10 +492,12 @@ function genChunk(cx: number, cz: number) {
   for (const kd of kinds) {
     const list: Instance[] = [], meta: Pickup[] = [];
     for (let i = 0; i < kd.cnt; i++) {
+      attempt(kd.t, i);
       const x = rx(), z = rz(), id = cx + ',' + cz + ',' + kd.t + i; if (!wOK(kd.w, x, z) || home(x, z, 2) || blocked(x, z, 0.5)) continue;
       const s = kd.scl ? kd.scl * (0.8 + R() * 0.5) : 1, rot = R() * TAU; if (collected.has(id)) continue;
       list.push({ m: mat4(x, H(x, z), z, 0, rot, 0, s, kd.t === 'fiber' ? s * 1.1 : s, s), r: 1, g: 1, b: 1 }); meta.push({ x, z, item: kd.item, id, dead: false } as Pickup);
     }
+    R = chunkR;
     const m = flush(list, kd.geo, kd.mat, false);
     if (m) meta.forEach((mt, i) => { mt.mesh = m; mt.idx = i; ch.picks.push(mt); });
   }
@@ -449,6 +508,13 @@ function genChunk(cx: number, cz: number) {
   }
   for (const e of edits.values()) if (e.i >= x0 && e.i < x0 + S && e.k >= z0 && e.k < z0 + S && e.j >= WG.terr(e.i, e.k).h - 1) removeSceneryIn(ch, e.i, e.k);
   scene.add(grp); return ch;
+}
+/** Points the game at another world. Everything derived from the old one goes: cached chunks, meshes and the player changes stored against it. */
+function applyWorld(seed: number, genVersion: number) {
+  WG.setWorld(seed, genVersion);
+  chunkData.clear(); gcx = gcz = 1e9; gd = null;
+  for (const ch of chunks.values()) disposeChunk(ch); chunks.clear();
+  edits.clear(); collected.clear(); deadNodes.clear(); chronicle = []; sinceDawn.length = 0;
 }
 function disposeChunk(ch: Chunk) { scene.remove(ch.grp); for (const d of ch.disp) d.dispose(); for (const m of Object.values(ch.gm)) if (m) m.geometry.dispose(); }
 function ensureChunks(force: boolean) {
@@ -583,7 +649,7 @@ function updateTOD() {
 /* ================= player, gnome, held models ================= */
 const P = { x: 0, z: 3, y: 0, vx: 0, vz: 0, vy: 0, heading: Math.PI, grounded: true, stamina: 100, exhausted: false, hp: 100, hunger: 80, speed: 0,
   cool: 0, swing: 0, swingHit: true, blocking: false, phase: 0, stepD: 0, invuln: 0, kx: 0, kz: 0, spawnX: 0, spawnZ: 3, regenT: 0 };
-let state: 'menu' | 'play' | 'sleep' | 'dead' = 'menu', ready = false, camYaw = 0, camPitch = 0.28, camDist = 6.2, camDistNow = 6.2, ugU = 0, uwU = 0, snowU = 0, fogD = 0.015, mining: { key: string; hp: number; max: number } | null = null, shake = 0, dmgFlash = 0, locked = false, mouseHeld = false, mouseX = innerWidth / 2, mouseY = innerHeight / 2;
+let state: 'menu' | 'play' | 'sleep' | 'dead' | 'dialogue' = 'menu', ready = false, camYaw = 0, camPitch = 0.28, camDist = 6.2, camDistNow = 6.2, ugU = 0, uwU = 0, snowU = 0, fogD = 0.015, mining: { key: string; hp: number; max: number } | null = null, shake = 0, dmgFlash = 0, locked = false, mouseHeld = false, mouseX = innerWidth / 2, mouseY = innerHeight / 2;
 const camTarget = new THREE.Vector3(0, 1.3, 3), keys: Record<string, boolean> = {};
 
 const gnome = (function () {
@@ -643,11 +709,11 @@ function makeHeld(id: string) {
   else if (d.tool === 'shovel') { add(new THREE.CylinderGeometry(0.035, 0.04, 0.85, 8), wood, 0, 0.32, 0); add(new THREE.BoxGeometry(0.06, 0.06, 0.2), wood, 0, 0.78, 0); add(new THREE.BoxGeometry(0.24, 0.36, 0.035), headM, 0, 0.0 - 0.02, 0.0).position.set(0, 0.86 - 0.02, 0); }
   else if (d.tool === 'sword') { add(new THREE.CylinderGeometry(0.03, 0.03, 0.2, 8), wood, 0, 0.1, 0); add(new THREE.BoxGeometry(0.3, 0.05, 0.06), new THREE.MeshStandardMaterial({ color: 0x8a6a2a, metalness: 0.6, roughness: 0.4 }), 0, 0.22, 0); add(new THREE.BoxGeometry(0.09, 0.78, 0.02), headM, 0, 0.64, 0); add(new THREE.ConeGeometry(0.045, 0.14, 4), headM, 0, 1.08, 0); }
   else if (d.k === 'shield') {
-    const face = id === 'cshield' ? 0x33254d : id === 'wshield' ? 0xb98450 : tc, m = new THREE.MeshStandardMaterial({ color: face, roughness: tier === 3 ? 0.3 : 0.7, metalness: tier === 3 ? 0.8 : 0.1 });
-    add(new THREE.CylinderGeometry(0.4, 0.4, 0.07, 20), m, 0, 0, 0, Math.PI / 2, 0, 0); add(new THREE.SphereGeometry(0.11, 12, 8), new THREE.MeshStandardMaterial({ color: id === 'cshield' ? 0x8f6bd6 : 0xd8b04a, metalness: 0.7, roughness: 0.3 }), 0, 0, 0.05);
+    const face = id === 'cshield' ? 0x33254d : id === 'eshield' ? 0x1d5a6a : id === 'wshield' ? 0xb98450 : tc, m = new THREE.MeshStandardMaterial({ color: face, roughness: tier === 3 ? 0.3 : 0.7, metalness: tier === 3 ? 0.8 : 0.1 });
+    add(new THREE.CylinderGeometry(0.4, 0.4, 0.07, 20), m, 0, 0, 0, Math.PI / 2, 0, 0); add(new THREE.SphereGeometry(0.11, 12, 8), new THREE.MeshStandardMaterial({ color: id === 'cshield' ? 0x8f6bd6 : id === 'eshield' ? 0x7ff0ff : 0xd8b04a, metalness: 0.7, roughness: 0.3 }), 0, 0, 0.05);
     add(new THREE.TorusGeometry(0.4, 0.03, 6, 20), new THREE.MeshStandardMaterial({ color: 0x3a3a3e, metalness: 0.7, roughness: 0.4 }), 0, 0, 0);
   } else if (d.k === 'block') { add(new THREE.BoxGeometry(0.3, 0.3, 0.3), new THREE.MeshStandardMaterial({ color: BCOL[d.bid!] || 0xaaaaaa, roughness: 0.9, emissive: d.bid === B.CRYSTAL ? 0x2288aa : 0x000000 }), 0, 0.16, 0.05); }
-  else if (d.k === 'station') { const c = ({ bench: 0xb98450, furnace: 0x86888d, camp: 0xd9812a, bed: 0xb7362d, torch: 0xffb030, ladder: 0x9a6a3a, crop: 0x6b8f3a } as Record<string, number>)[d.place!] || 0xaaaaaa; add(new THREE.BoxGeometry(0.32, 0.32, 0.32), new THREE.MeshStandardMaterial({ color: c, roughness: 0.8 }), 0, 0.18, 0.05); }
+  else if (d.k === 'station') { const c = ({ bench: 0xb98450, furnace: 0x86888d, camp: 0xd9812a, bed: 0xb7362d, torch: 0xffb030, lantern: 0x5fe0ff, ladder: 0x9a6a3a, crop: 0x6b8f3a, door: 0x9a6a3a } as Record<string, number>)[d.place!] || 0xaaaaaa; add(new THREE.BoxGeometry(0.32, 0.32, 0.32), new THREE.MeshStandardMaterial({ color: c, roughness: 0.8, emissive: d.place === 'lantern' ? 0x176070 : 0x000000 }), 0, 0.18, 0.05); }
   else if (d.k === 'food') { const c = ({ berries: 0xc0223a, mushroom: 0xc9a066, cmush: 0x8a4a1e, bandage: 0xf1ece0, meat: 0xd9707a, cmeat: 0x8a4a2a } as Record<string, number>)[id]; add(new THREE.SphereGeometry(0.11, 10, 8), new THREE.MeshStandardMaterial({ color: c, roughness: 0.6 }), 0, 0.12, 0.04); }
   else { const c = ({ wood: 0x7b5330, stick: 0x7a5230, stone: 0x8d8f93, fiber: 0xb7c66a, ore: 0x6f6a66, ingot: 0xd5dbe2, shell: 0x33254d, coal: 0x2a2a2e } as Record<string, number>)[id] || 0xaaaaaa; add(new THREE.IcosahedronGeometry(0.12, 0), new THREE.MeshStandardMaterial({ color: c, roughness: 0.7, metalness: id === 'ingot' ? 0.8 : 0 }), 0, 0.12, 0.04); }
   return g;
@@ -666,7 +732,7 @@ function updateHeld() {
 }
 
 /* ================= aiming ================= */
-const ray = new THREE.Raycaster(), ndc = new THREE.Vector2(0, 0), aim: Aim = { type: null, cell: null, ok: false, place: null, placeOK: false, pt: new THREE.Vector3(), node: null, block: null, enemy: null };
+const ray = new THREE.Raycaster(), ndc = new THREE.Vector2(0, 0), aim: Aim = { type: null, cell: null, ok: false, place: null, placeOK: false, pt: new THREE.Vector3(), node: null, block: null, enemy: null, resident: null, site: null };
 function rayCyl(o: THREE.Vector3, d: THREE.Vector3, cx: number, cz: number, r: number, y0: number, y1: number) {
   const ox = o.x - cx, oz = o.z - cz, a = d.x * d.x + d.z * d.z; if (a < 1e-8) return null;
   const b = 2 * (ox * d.x + oz * d.z), c = ox * ox + oz * oz - r * r, disc = b * b - 4 * a * c; if (disc < 0) return null;
@@ -676,10 +742,12 @@ function rayCyl(o: THREE.Vector3, d: THREE.Vector3, cx: number, cz: number, r: n
 function computeAim() {
   if (locked || isTouch) ndc.set(0, 0); else ndc.set(mouseX / innerWidth * 2 - 1, -(mouseY / innerHeight * 2 - 1));
   camera.updateMatrixWorld(); ray.setFromCamera(ndc, camera); const o = ray.ray.origin, d = ray.ray.direction;
-  aim.type = null; aim.node = null; aim.block = null; aim.enemy = null; aim.place = null; aim.cell = null; aim.ok = false; aim.placeOK = false;
+  aim.type = null; aim.node = null; aim.block = null; aim.enemy = null; aim.resident = null; aim.site = null; aim.place = null; aim.cell = null; aim.ok = false; aim.placeOK = false;
   let bestT = 1e9;
   nearChunks(ch => { for (const n of ch.nodes) { if (n.dead) continue; const t = rayCyl(o, d, n.x, n.z, n.r + 0.15, n.y0, n.y0 + n.h); if (t !== null && t < bestT) { bestT = t; aim.type = 'node'; aim.node = n; } } });
-  for (const e of enemies) { if (e.dying) continue; const t = rayCyl(o, d, e.x, e.z, 0.85, e.y, e.y + 1.0); if (t !== null && t < bestT) { bestT = t; aim.type = 'enemy'; aim.enemy = e; aim.node = null; } }
+  for (const e of enemies) { if (e.dying) continue; const t = rayCyl(o, d, e.x, e.z, e.rad ?? 0.85, e.y, e.y + (e.boss ? 3 : 1.0)); if (t !== null && t < bestT) { bestT = t; aim.type = 'enemy'; aim.enemy = e; aim.node = null; } }
+  for (const r of residents) { const t = rayCyl(o, d, r.x, r.z, 0.5, r.y, r.y + 0.9); if (t !== null && t < bestT) { bestT = t; aim.type = 'resident'; aim.resident = r; aim.node = null; aim.enemy = null; } }
+  for (const part of siteParts) { const t = rayCyl(o, d, part.x, part.z, part.siteId === 'door' ? 1.1 : 0.65, part.y, part.y + (part.siteId === 'door' ? 2.8 : 2.3)); if (t !== null && t < bestT) { bestT = t; aim.type = 'site'; aim.site = part; aim.node = null; aim.enemy = null; aim.resident = null; } }
   let prev: number[] | null = null, li = 1e9, lj = 0, lk = 0; const tmax = Math.min(bestT, 20);
   for (let t = 0.4; t < tmax; t += 0.07) {
     const px = o.x + d.x * t, py = o.y + d.y * t, pz = o.z + d.z * t, i = Math.floor(px), j = Math.floor(py), k = Math.floor(pz);
@@ -692,7 +760,9 @@ function computeAim() {
     aim.pt.set(o.x + d.x * bestT, o.y + d.y * bestT, o.z + d.z * bestT);
     aim.ok = Math.hypot(aim.pt.x - P.x, aim.pt.y - (P.y + 0.9), aim.pt.z - P.z) < REACH;
     { const an = aim.node as SceneNode | null; if ((aim.type as Aim['type']) === 'node' && an) aim.ok = Math.hypot(an.x - P.x, an.z - P.z) < REACH + an.r; }
-    if (aim.type === 'enemy') aim.ok = Math.hypot(aim.enemy!.x - P.x, aim.enemy!.z - P.z) < REACH;
+    if ((aim.type as Aim['type']) === 'resident' && aim.resident) aim.ok = Math.hypot(aim.resident.x - P.x, aim.resident.z - P.z) < REACH + 0.5;
+    if ((aim.type as Aim['type']) === 'site' && aim.site) aim.ok = Math.hypot(aim.site.x - P.x, aim.site.z - P.z) < REACH + 1;
+    if (aim.type === 'enemy') aim.ok = Math.hypot(aim.enemy!.x - P.x, aim.enemy!.z - P.z) < REACH + ((aim.enemy!.rad ?? 0.85) - 0.85);
     if (aim.place) {
       const [i, j, k] = aim.place;
       let ok = !solid(i, j, k) && !blocks.has(key(i, j, k)) && Math.hypot(i + 0.5 - P.x, k + 0.5 - P.z) < REACH + 1.2;
@@ -727,7 +797,7 @@ function makeBeetle() {
 function drawBar(e: Enemy) {
   const c = ctx2d(e.cv); c.clearRect(0, 0, 64, 8); c.fillStyle = 'rgba(0,0,0,0.6)'; c.fillRect(0, 0, 64, 8); c.fillStyle = '#d9483b'; c.fillRect(1, 1, 62 * clamp(e.hp / e.max, 0, 1), 6); e.tex.needsUpdate = true;
 }
-let spawnT = 6, caveT = 12;
+let spawnT = 6, caveT = 12, lastBossDay = 0;
 function spawnBeetle() {
   let x = 0, z = 0, y = 0, cave = false;
   if (ugU > 0.5) {
@@ -745,16 +815,56 @@ function spawnBeetle() {
   const e: Enemy = { x, z, y, cave, vx: 0, vz: 0, hp: 30, max: 30, cd: 1, heading: 0, phase: Math.random() * 6, dying: 0, burn: 0, kx: 0, kz: 0, ...m };
   e.g.position.set(x, e.y, z); e.g.scale.setScalar(1.15); scene.add(e.g); drawBar(e); enemies.push(e);
 }
+/** The Elder Beetle: a much larger beetle with its own attack pattern (see systems/boss.ts). */
+function spawnBoss(day: number) {
+  const a = Math.random() * TAU, d = 32 + Math.random() * 6, x = P.x + Math.cos(a) * d, z = P.z + Math.sin(a) * d;
+  if (WG.terr(Math.floor(x), Math.floor(z)).h <= SEA + 1) return;
+  const m = makeBeetle();
+  m.g.traverse(o => { const mesh = o as THREE.Mesh; if (mesh.isMesh && mesh.material instanceof THREE.MeshStandardMaterial) { const mat = mesh.material.clone(); mat.emissive.set(0x3a1466); mesh.material = mat; } });
+  m.bar.visible = false;
+  const e: Enemy = { x, z, y: surf(x, z), cave: false, vx: 0, vz: 0, hp: BOSS_HP, max: BOSS_HP, cd: 1, heading: 0, phase: 0, dying: 0, burn: 0, kx: 0, kz: 0, boss: newBoss(), base: BOSS_SCALE, rad: BOSS_SCALE * 0.9, ...m };
+  e.g.position.set(x, e.y, z); e.g.scale.setScalar(BOSS_SCALE); scene.add(e.g); enemies.push(e); lastBossDay = day;
+  toast('The ground trembles. Something ancient has woken.', true, 4200); sfx.growl();
+}
+function updateBoss(e: Enemy, dt: number) {
+  const b = e.boss!, dx = P.x - e.x, dz = P.z - e.z, d = Math.hypot(dx, dz) || 1, tx = dx / d, tz = dz / d, prev = b.phase;
+  const r = stepBoss(b, dt, state === 'play' ? d : 99, e.hp / e.max);
+  if (prev === 'windup' && b.phase === 'charge') { e.vx = tx * CHARGE_SPEED; e.vz = tz * CHARGE_SPEED; }
+  else if (b.phase === 'stalk') { const sp = state === 'play' ? speedOf(b) : 0; e.vx += (tx * sp - e.vx) * Math.min(1, dt * 4); e.vz += (tz * sp - e.vz) * Math.min(1, dt * 4); }
+  else if (b.phase !== 'charge') { e.vx *= 0.8; e.vz *= 0.8; }
+  e.x += e.vx * dt; e.z += e.vz * dt;
+  const o = { x: e.x, z: e.z }; pushFromBlocks(o, 1.2, e.y + 1.02, e.y + 1.9); e.x = o.x; e.z = o.z;
+  nearChunksAt(e.x, e.z, ch => { for (const c of ch.col) { const ax = e.x - c.x, az = e.z - c.z, dd = Math.hypot(ax, az), md = c.r + 1.4; if (dd < md && dd > 1e-4) { e.x = c.x + ax / dd * md; e.z = c.z + az / dd * md; } } });
+  e.y += (floorY(e.x, e.z, e.y) - e.y) * Math.min(1, dt * 12);
+  if (b.phase !== 'charge') e.heading += angDiff(Math.atan2(tx, tz), e.heading) * Math.min(1, dt * 5);
+  if (r.hit && state === 'play') {
+    damagePlayer(BOSS_DAMAGE, e); shake = Math.max(shake, 0.6);
+    if (b.phase === 'recover' && prev === 'slam') burst(e.x + tx * 2.4, e.y + 0.2, e.z + tz * 2.4, 0x8a7a5a, 14);
+  }
+  if (prev === 'slam') { sfx.brk(); shake = Math.max(shake, d < 22 ? 0.5 : 0); burst(e.x + tx * 2.4, e.y + 0.2, e.z + tz * 2.4, 0x8a7a5a, 14); }
+  e.phase += Math.hypot(e.vx, e.vz) * dt * 1.6;
+  const rear = b.phase === 'windup' ? Math.min(1, b.t / WINDUP) : b.phase === 'recover' ? -0.25 : 0;
+  e.g.position.set(e.x, e.y + Math.abs(Math.sin(e.phase)) * 0.06, e.z); e.g.rotation.set(-rear * 0.5, e.heading, 0);
+  e.g.scale.setScalar(BOSS_SCALE * (b.phase === 'windup' ? 1 + 0.07 * Math.sin(b.t * 30) : 1));
+  for (const l of e.legs) l.p.rotation.x = Math.sin(e.phase + l.ph) * 0.5;
+}
+function updateBossBar() {
+  const b = enemies.find(q => q.boss && !q.dying), el = $('boss');
+  if (!b) { el.classList.add('hidden'); return; }
+  el.classList.remove('hidden'); $('bossF').style.width = clamp(b.hp / b.max * 100, 0, 100) + '%'; $('bossName').textContent = BOSS_NAME + (b.boss!.enraged ? ' (enraged)' : '');
+}
 function removeEnemy(e: Enemy) { scene.remove(e.g); e.tex.dispose(); const i = enemies.indexOf(e); if (i >= 0) enemies.splice(i, 1); }
-function fireNear(x: number, z: number, r: number) { for (const b of stations) if ((b.t === 'camp' || b.t === 'torch') && Math.hypot(b.i + 0.5 - x, b.k + 0.5 - z) < (b.t === 'camp' ? r : r * 0.45)) return b; return null; }
+function fireNear(x: number, z: number, r: number) { for (const b of stations) if (Math.hypot(b.i + 0.5 - x, b.k + 0.5 - z) < beetleWardRadius(b.t, r)) return b; return null; }
 function updateEnemies(dt: number, t: number) {
   const day = Math.floor(todT / DAY_LEN);
   spawnT -= dt; caveT -= dt;
   if (state === 'play' && ugU > 0.6 && caveT <= 0 && enemies.filter(q => q.cave).length < 3) { spawnBeetle(); caveT = 9 + Math.random() * 8; }
   if (state === 'play' && TOD.night > 0.35 && enemies.length < Math.min(9, 3 + day * 2) && spawnT <= 0) { spawnBeetle(); spawnT = 3.5 + Math.random() * 3; if (Math.random() < 0.3) sfx.growl(); }
+  if (state === 'play' && shouldSpawn({ day: day + 1, night: TOD.night, underground: ugU > 0.4, bossOut: enemies.some(q => !!q.boss), lastBossDay, defeated: progress.has('kill:elder') })) spawnBoss(day + 1);
   for (const e of enemies.slice()) {
-    if (e.dying) { e.dying += dt; e.g.scale.setScalar(Math.max(0.01, 1.15 * (1 - e.dying * 1.6))); if (e.dying > 0.65) removeEnemy(e); continue; }
-    if ((!e.cave && TOD.night < 0.12) || Math.hypot(e.x - P.x, e.z - P.z) > 70) { e.burn += dt; e.g.scale.setScalar(Math.max(0.01, 1.15 * (1 - e.burn * 0.5))); if (e.burn > 1.9) { removeEnemy(e); continue; } }
+    if (e.dying) { e.dying += dt; e.g.scale.setScalar(Math.max(0.01, (e.base ?? 1.15) * (1 - e.dying * 1.6))); if (e.dying > 0.65) removeEnemy(e); continue; }
+    if ((!e.cave && TOD.night < 0.12) || Math.hypot(e.x - P.x, e.z - P.z) > 70) { e.burn += dt; e.g.scale.setScalar(Math.max(0.01, (e.base ?? 1.15) * (1 - e.burn * 0.5))); if (e.burn > 1.9) { removeEnemy(e); continue; } }
+    if (e.boss) { updateBoss(e, dt); continue; }
     const dx = P.x - e.x, dz = P.z - e.z, d = Math.hypot(dx, dz) || 1; let tx = 0, tz = 0, sp = 0;
     if (state === 'play' && d < 30) { tx = dx / d; tz = dz / d; sp = d < 12 ? 4.2 : 3.4; }
     const f = fireNear(e.x, e.z, 9); if (f) { const fx = e.x - (f.i + 0.5), fz = e.z - (f.k + 0.5), fl = Math.hypot(fx, fz) || 1; tx = fx / fl; tz = fz / fl; sp = 4; }
@@ -843,7 +953,7 @@ function useItem() {
   if (kind === 'food') {
     if (d!.food! > 0 && P.hunger >= 99 && d!.heal === 0) { toast('You are not hungry'); return; }
     if (d!.heal! > 0 && P.hp >= 99 && d!.food === 0) { toast('You are healthy'); return; }
-    P.hunger = Math.min(100, P.hunger + d!.food!); P.hp = Math.min(100, P.hp + d!.heal!); s!.n--; if (s!.n <= 0) inv[sel] = null; P.cool = 0.5; sfx.eat(); renderHot(); updateHeld(); return;
+    P.hunger = Math.min(100, P.hunger + d!.food!); P.hp = Math.min(100, P.hp + d!.heal!); note('eat:' + s!.id); s!.n--; if (s!.n <= 0) inv[sel] = null; P.cool = 0.5; sfx.eat(); renderHot(); updateHeld(); return;
   }
   if (kind === 'block' || kind === 'station') { tryPlace(); return; }
   startSwing();
@@ -851,6 +961,10 @@ function useItem() {
 function tryPlace() {
   if (!aim.place || !aim.placeOK) { toast('You cannot place that there', true, 1200); P.cool = 0.25; return; }
   const [i, j, k] = aim.place, s = inv[sel]!, d = ITEMS[s.id]; if (d.k === 'station') {
+    if (d.place === 'door') {
+      const near = Math.abs(i + 0.5 - P.x) < PRAD + 0.5 && Math.abs(k + 0.5 - P.z) < PRAD + 0.5 && j + 1 < P.y + PHGT && j + 2 > P.y + 0.05;
+      if (solid(i, j + 1, k) || blocks.has(key(i, j + 1, k)) || near) { toast('A door needs two free blocks of height', true, 1500); P.cool = 0.25; return; }
+    }
     if (d.place === 'crop' && !isSoil(getBlock(i, j - 1, k))) { toast('Seeds need soil: grass or dirt', true, 1500); P.cool = 0.25; return; }
     const pb = placeStation(i, j, k, d.place!); note('place:' + d.place);
     if (pb.t === 'crop') toast(pb.wet ? 'Planted. Water is close, so it will grow well' : 'Planted. No water nearby, so it will grow slowly', false, 2600);
@@ -860,7 +974,7 @@ function tryPlace() {
 function resolveSwing() {
   const ts = toolStats(), fx = Math.sin(P.heading), fz = Math.cos(P.heading);
   let best: Enemy | null = null, bd = 1e9;
-  for (const e of enemies) { if (e.dying) continue; const dx = e.x - P.x, dz = e.z - P.z, d = Math.hypot(dx, dz); if (d < ts.range + 0.6 && (dx * fx + dz * fz) / (d || 1) > 0.25 && d < bd) { bd = d; best = e; } }
+  for (const e of enemies) { if (e.dying) continue; const dx = e.x - P.x, dz = e.z - P.z, d = Math.hypot(dx, dz); if (d < ts.range + 0.6 + ((e.rad ?? 0.85) - 0.85) && (dx * fx + dz * fz) / (d || 1) > 0.25 && d < bd) { bd = d; best = e; } }
   if (best) { hitEnemy(best, ts); return; }
   let hb: Critter | null = null, hd = 1e9;
   for (const c of critters) { if (c.dying) continue; const dx = c.x - P.x, dz = c.z - P.z, d = Math.hypot(dx, dz); if (d < ts.range + 0.7 && (dx * fx + dz * fz) / (d || 1) > 0.2 && d < hd) { hd = d; hb = c; } }
@@ -870,8 +984,9 @@ function resolveSwing() {
   if (aim.ok && aim.type === 'ground' && aim.cell) { hitGround(aim.cell, ts); return; }
 }
 function hitEnemy(e: Enemy, ts: ToolStats) {
-  e.hp -= ts.dmg; e.kx = (e.x - P.x) * 3; e.kz = (e.z - P.z) * 3; sfx.squish(); burst(e.x, e.y + 0.6, e.z, 0x8f6bd6, 8); drawBar(e); wear(ts);
-  if (e.hp <= 0) { e.dying = 0.001; tally.kills++; note('kill:beetle'); if (Math.random() < 0.7) giveItem('shell', 1 + (Math.random() < 0.35 ? 1 : 0)); }
+  e.hp -= ts.dmg * (e.boss ? damageMult(e.boss) : 1); if (!e.boss) { e.kx = (e.x - P.x) * 3; e.kz = (e.z - P.z) * 3; } sfx.squish(); burst(e.x, e.y + 0.6, e.z, 0x8f6bd6, 8); drawBar(e); wear(ts);
+  if (e.hp <= 0 && e.boss) { e.dying = 0.001; tally.kills++; note('kill:elder'); giveItem('eshell', 2 + (Math.random() < 0.5 ? 1 : 0)); giveItem('shell', 3); toast('The Elder Beetle falls. Its carapace is yours.', false, 4200); }
+  else if (e.hp <= 0) { e.dying = 0.001; tally.kills++; note('kill:beetle'); if (Math.random() < 0.7) giveItem('shell', 1 + (Math.random() < 0.35 ? 1 : 0)); }
 }
 function giveItem(id: string, n: number) {
   const left = addItem(id, n);
@@ -911,6 +1026,7 @@ function harvestBush(n: SceneNode) {
   n.ready = false; n.regrow = 90; n.mesh.geometry = G.bush; giveItem('berries', 2 + ((Math.random() * 3) | 0)); if (Math.random() < 0.6) setTimeout(() => giveItem('seed', 1), 800); sfx.pickup(); tip('berry', 'Berries keep your hunger up. Cook mushrooms at a campfire for more.');
 }
 function hitBlock(b: Station, ts: ToolStats) {
+  if (b.link) b = b.link;
   if (b.t === 'crop') { harvestCrop(b); return; }
   const def = BDEF[b.t], pow = ts.d && ts.d.tool === def.tool ? ts.blockPow : 0.7; b.hp -= pow; sfx.chop(); burst(b.i + 0.5, b.j + 0.6, b.k + 0.5, (b.t as string) === 'brick' ? 0xaaaaaa : 0xc69258, 5);
   if (ts.d && ts.d.tool === def.tool) wear(ts);
@@ -948,7 +1064,7 @@ function floodFrom(i: number, j: number, k: number) {
   const q: number[][] = [[i, j, k]]; let n = 0;
   while (q.length && n < 600) {
     const c = q.pop()!; if (c[1] > SEA || getBlock(c[0], c[1], c[2]) !== 0 || !touchesWater(c[0], c[1], c[2])) continue;
-    setVox(c[0], c[1], c[2], B.WATER); n++; for (const d of NB6) q.push([c[0] + d[0], c[1] + d[1], c[2] + d[2]]);
+    setVox(c[0], c[1], c[2], B.WATER, 'flooded'); n++; for (const d of NB6) q.push([c[0] + d[0], c[1] + d[1], c[2] + d[2]]);
   }
 }
 function digCell(i: number, j: number, k: number, id: number) {
@@ -959,12 +1075,15 @@ function interact() {
   if (state !== 'play') return;
   if (journalOpen) { toggleJournal(false); return; }
   if (uiOpen) { toggleInv(false); return; }
+  if ((aim.type as Aim['type']) === 'resident' && aim.resident && aim.ok) { talkTo(aim.resident); return; }
+  if ((aim.type as Aim['type']) === 'site' && aim.site && aim.ok) { interactStorySite(aim.site); return; }
   if (aim.type === 'node' && aim.node && aim.node.kind === 'bush' && aim.ok) { harvestBush(aim.node); return; }
   if (aim.type === 'block' && aim.block && aim.ok) {
     const t = aim.block.t;
     if (t === 'bench' || t === 'furnace' || t === 'camp') { toggleInv(true); return; }
     if (t === 'bed') { sleep(aim.block); return; }
     if (t === 'crop') { harvestCrop(aim.block); return; }
+    if (t === 'door') { toggleDoor(aim.block.link ?? aim.block); return; }
   }
   toggleInv(true);
 }
@@ -978,7 +1097,7 @@ function sleep(b: Station) {
     P.hp = 100; P.hunger = Math.max(25, P.hunger - 15); P.spawnX = b.i + 0.5; P.spawnZ = b.k + 2;
     for (const e of enemies.slice()) removeEnemy(e);
     $('fade').classList.remove('on'); state = 'play';
-    note('slept'); showDawn(dawnLines(tally, Math.floor(todT / DAY_LEN) + 1, nextStep(progress)?.step.text ?? null, garden)); tally = newTally();
+    note('slept'); showDawn(dawnLines(tally, Math.floor(todT / DAY_LEN) + 1, nextStep(progress)?.step.text ?? null, garden, summarize(sinceDawn))); tally = newTally(); sinceDawn.length = 0;
   }, 900);
 }
 function die() {
@@ -1011,18 +1130,223 @@ function tip(k: string, text: string) { if (tips[k]) return; tips[k] = 1; setTim
 let toastTimer = 0;
 function toast(text: string, bad?: boolean, ms?: number) { const el = $('toast'); el.textContent = text; el.className = 'show' + (bad ? ' bad' : ''); clearTimeout(toastTimer); toastTimer = window.setTimeout(() => { el.className = ''; }, ms || 2600); }
 
+/* ================= story landmarks ================= */
+const siteParts: StorySitePart[] = [], siteGroups: THREE.Object3D[] = [];
+let siteHumAt = 0;
+function clearStorySiteVisuals() { for (const group of siteGroups) scene.remove(group); siteGroups.length = 0; siteParts.length = 0; }
+function addSitePart(site: StorySite, partId: string, group: THREE.Group, x: number, z: number) {
+  const y = H(x, z); group.position.set(x, y, z); scene.add(group); siteGroups.push(group); siteParts.push({ siteId: site.id, partId, x, y, z, g: group });
+}
+function rebuildStorySiteVisuals() {
+  clearStorySiteVisuals(); if (!story.enabled) return;
+  const stone = new THREE.MeshStandardMaterial({ color: 0x737878, roughness: 1 }), rune = new THREE.MeshStandardMaterial({ color: 0x84e6ee, emissive: 0x2aa9bb, emissiveIntensity: 0.8, roughness: 0.45 });
+  for (const site of loreSites) {
+    if (site.id === 'listening') {
+      const offsets: [string, number, number][] = [['north', 0, -2.3], ['east', 2, 1.35], ['west', -2, 1.35]];
+      for (const [partId, ox, oz] of offsets) {
+        const g = new THREE.Group(), body = new THREE.Mesh(new THREE.BoxGeometry(0.72, 2.1, 0.55), stone); body.position.y = 1.05; body.rotation.z = ox * 0.035; body.castShadow = true; g.add(body);
+        const mark = new THREE.Mesh(new THREE.OctahedronGeometry(0.13, 0), rune.clone()); mark.position.set(0, 1.18, 0.31); g.add(mark); g.userData.rune = mark;
+        addSitePart(site, partId, g, site.x + ox, site.z + oz);
+      }
+      const basin = new THREE.Mesh(new THREE.CylinderGeometry(1.1, 1.25, 0.3, 12), stone); basin.position.set(site.x, site.y + 0.15, site.z); basin.receiveShadow = true; scene.add(basin); siteGroups.push(basin);
+    } else {
+      const repaired = !!story.sites.door?.repaired, g = new THREE.Group(), wood = new THREE.MeshStandardMaterial({ color: repaired ? 0x8f6339 : 0x66513b, roughness: 0.95 }), oldStone = new THREE.MeshStandardMaterial({ color: 0x77766f, roughness: 1 });
+      const left = new THREE.Mesh(new THREE.BoxGeometry(0.32, 2.65, 0.42), oldStone), right = left.clone(); left.position.set(-0.85, 1.325, 0); right.position.set(0.85, 1.325, 0); g.add(left, right);
+      const lintel = new THREE.Mesh(new THREE.BoxGeometry(2.05, 0.34, 0.46), oldStone); lintel.position.y = 2.56; g.add(lintel);
+      const panel = new THREE.Mesh(new THREE.BoxGeometry(1.35, 2.22, 0.16), wood); panel.position.y = 1.12; panel.rotation.z = repaired ? 0 : -0.14; panel.castShadow = true; g.add(panel);
+      const knob = new THREE.Mesh(new THREE.SphereGeometry(0.08, 8, 6), new THREE.MeshStandardMaterial({ color: 0xb88a35, metalness: 0.6, roughness: 0.35 })); knob.position.set(0.47, 1.13, 0.12); g.add(knob);
+      addSitePart(site, 'door', g, site.x, site.z);
+      const chair = new THREE.Group(), seat = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.12, 0.8), wood); seat.position.y = 0.65; chair.add(seat);
+      for (const [x, z] of [[-0.32, -0.32], [0.32, -0.32], [-0.32, 0.32], [0.32, 0.32]]) { const leg = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.65, 0.1), wood); leg.position.set(x, 0.325, z); chair.add(leg); }
+      chair.rotation.y = Math.PI; chair.position.set(site.x + 2.2, H(site.x + 2.2, site.z), site.z); scene.add(chair); siteGroups.push(chair);
+    }
+  }
+}
+function storySite(id: string) { return loreSites.find(site => site.id === id) ?? null; }
+function trackedStorySite() {
+  if (!story.tracked || !story.active[story.tracked]) return null;
+  const stage = currentStage(story, story.tracked);
+  if (story.tracked === 'listening-stones' && stage?.id === 'listen') return storySite('listening');
+  if (story.tracked === 'door-without-house' && stage) return storySite('door');
+  return null;
+}
+function updateStorySites(t: number) {
+  if (!story.enabled) return;
+  const door = storySite('door'), side = story.active['door-without-house'];
+  if (state === 'play' && door && side && currentStage(story, 'door-without-house')?.id === 'find' && Math.hypot(P.x - door.x, P.z - door.z) < 10) note('site:door:found');
+  const tracked = trackedStorySite();
+  if (state === 'play' && tracked && Math.hypot(P.x - tracked.x, P.z - tracked.z) < 20) {
+    if (t > siteHumAt) { siteHumAt = t + 5.5; sfx.hum(); tip('site-near:' + tracked.id, 'A low hum runs through the ground. The old place is very close.'); }
+  }
+  for (const part of siteParts) if (part.siteId === 'listening' && part.g.userData.rune) {
+    const mark = part.g.userData.rune as THREE.Mesh, mat = mark.material as THREE.MeshStandardMaterial, near = tracked?.id === 'listening' && Math.hypot(P.x - part.x, P.z - part.z) < 20;
+    mat.emissiveIntensity = near ? 1.4 + Math.sin(t * 2.5) * 0.45 : 0.55;
+  }
+}
+function interactStorySite(part: StorySitePart) {
+  if (part.siteId === 'listening') {
+    if (currentStage(story, 'listening-stones')?.id !== 'listen') { say('Listening Stones', 'Old place', 'The stone is cool and silent.'); return; }
+    const lines: Record<string, string> = { north: 'A voice like rain says: do not take light...', east: 'A voice like iron answers: ...from beneath...', west: 'A voice like roots finishes: ...the roots.' };
+    note('site:listening:' + part.partId); say('Listening Stones', 'Remembered voice', lines[part.partId] ?? 'The stone hums, then falls quiet.'); sfx.hum(); return;
+  }
+  const stage = currentStage(story, 'door-without-house');
+  if (!stage) { say('Old Door', 'Forest ruin', story.sites.door?.knocked ? 'The keyhole is empty. Something beyond the door is listening.' : 'The frame leans without a wall to hold it.'); return; }
+  if (stage.id === 'find') { note('site:door:found'); say('Old Door', 'Forest ruin', 'The frame is split, but four fresh planks would settle it.'); return; }
+  if (stage.id === 'repair') {
+    if (countItem('plank') < 4) { toast('The old door needs 4 planks', true, 1800); return; }
+    removeItems('plank', 4); story.sites.door = { ...(story.sites.door ?? {}), found: true, repaired: true, repairedDay: dayNow() }; renderHot(); updateHeld(); note('site:door:repair'); rebuildStorySiteVisuals(); say('Old Door', 'Repaired', 'The new planks settle with a sound like a long breath. Let the door stand through one night.'); sfx.place(); return;
+  }
+  if (stage.id === 'wait') { say('Old Door', 'Waiting', 'The repaired frame is still warm from your hands. It needs a night to remember itself.'); return; }
+  if (stage.id === 'knock') {
+    story.sites.door = { ...(story.sites.door ?? {}), knocked: true }; note('site:door:knock'); say('Old Door', 'Answered', 'Three knocks answer from the empty air. An old iron key waits in the latch.'); sfx.hum(); return;
+  }
+}
+
+/* ================= residents ================= */
+const residents: Resident[] = [], friends: Record<string, Friend> = {};
+let homeT = 1, speechTimer = 0;
+const roomQuery: RoomQuery = { wall: (i, j, k) => solid(i, j, k) || blocks.get(key(i, j, k))?.t === 'door' };
+function makeHedgehog() {
+  const g = new THREE.Group(), fur = new THREE.MeshStandardMaterial({ color: 0x8a6a4a, roughness: 0.95 }), face = new THREE.MeshStandardMaterial({ color: 0xe4c8a0, roughness: 0.9 }), spine = new THREE.MeshStandardMaterial({ color: 0x4a3626, roughness: 1 }), dk = new THREE.MeshStandardMaterial({ color: 0x141010, roughness: 0.4 }), scarf = new THREE.MeshStandardMaterial({ color: 0xc8322e, roughness: 0.8 });
+  const S1 = new THREE.SphereGeometry(1, 12, 10), ball = (m: THREE.Material, sx: number, sy: number, sz: number, x: number, y: number, z: number) => { const o = new THREE.Mesh(S1, m); o.scale.set(sx, sy, sz); o.position.set(x, y, z); o.castShadow = true; g.add(o); return o; };
+  ball(fur, 0.28, 0.26, 0.36, 0, 0.3, -0.04); ball(face, 0.18, 0.17, 0.22, 0, 0.27, 0.3); ball(dk, 0.04, 0.04, 0.04, 0, 0.27, 0.5);
+  for (const s of [-1, 1]) { ball(dk, 0.025, 0.03, 0.02, s * 0.07, 0.34, 0.4); ball(face, 0.06, 0.08, 0.03, s * 0.12, 0.42, 0.24); }
+  ball(scarf, 0.2, 0.06, 0.2, 0, 0.36, 0.16);
+  for (let q = 0; q < 14; q++) { const a = (q / 14) * Math.PI - Math.PI / 2, c = new THREE.Mesh(new THREE.ConeGeometry(0.05, 0.22, 5), spine); c.position.set(Math.sin(a) * 0.2, 0.44 + Math.cos(a) * 0.16, -0.14 - Math.abs(Math.sin(a)) * 0.06); c.rotation.x = -0.9 - Math.cos(a) * 0.3; c.rotation.z = -Math.sin(a) * 0.8; c.castShadow = true; g.add(c); }
+  return g;
+}
+/** Looks for a valid cottage around a bed. Returns the room and its floor when it has everything a resident needs. */
+function cottageAt(bed: Station) {
+  for (const start of startsNear(bed, roomQuery)) {
+    const room = findRoom(roomQuery, start);
+    if (room.enclosed && checkCottage(room, stations).ok) return { start, floor: floorCells(room, roomQuery) };
+  }
+  return null;
+}
+function spawnResident(id: string, home: Cell, floor: Cell[]) {
+  const c = floor.length ? floor[(Math.random() * floor.length) | 0] : home;
+  const r: Resident = { id, x: c[0] + 0.5, z: c[2] + 0.5, y: c[1], heading: Math.random() * TAU, phase: 0, wait: 1, home, floor, target: null, g: makeHedgehog() };
+  r.g.position.set(r.x, r.y, r.z); scene.add(r.g); residents.push(r); friends[id] ||= newFriend(); return r;
+}
+function removeResident(r: Resident) { scene.remove(r.g); const i = residents.indexOf(r); if (i >= 0) residents.splice(i, 1); }
+/** Every couple of seconds: residents whose home was broken leave, and a valid cottage attracts a resident who has none. */
+function checkHomes() {
+  for (const r of residents.slice()) {
+    const room = findRoom(roomQuery, r.home);
+    if (room.enclosed && checkCottage(room, stations).ok) { r.floor = floorCells(room, roomQuery); continue; }
+    removeResident(r); toast(RESIDENTS[r.id].name + ' has left: the cottage is no longer a safe home', true, 4200);
+  }
+  for (const id of Object.keys(RESIDENTS)) {
+    if (residents.some(r => r.id === id)) continue;
+    for (const bed of stations) if (bed.t === 'bed') {
+      const home = cottageAt(bed); if (!home) continue;
+      spawnResident(id, home.start, home.floor); note('cottage'); note('resident:' + id);
+      const def = RESIDENTS[id]; toast(def.name + ' the ' + def.title + ' has moved into your cottage!', false, 4200); sfx.craft();
+      break;
+    }
+  }
+}
+function updateResidents(dt: number, t: number) {
+  homeT -= dt; if (homeT <= 0 && state === 'play') { homeT = 2.5; checkHomes(); }
+  for (const r of residents) {
+    r.wait -= dt;
+    if (!r.target && r.wait <= 0 && r.floor.length) { const c = r.floor[(Math.random() * r.floor.length) | 0]; r.target = { x: c[0] + 0.5, z: c[2] + 0.5 }; }
+    let sp = 0;
+    if (r.target) {
+      const dx = r.target.x - r.x, dz = r.target.z - r.z, d = Math.hypot(dx, dz);
+      if (d < 0.15) { r.target = null; r.wait = 2 + Math.random() * 5; }
+      else { sp = 1.1; r.x += dx / d * sp * dt; r.z += dz / d * sp * dt; r.heading += angDiff(Math.atan2(dx, dz), r.heading) * Math.min(1, dt * 6); }
+    } else if (Math.hypot(P.x - r.x, P.z - r.z) < 5) r.heading += angDiff(Math.atan2(P.x - r.x, P.z - r.z), r.heading) * Math.min(1, dt * 4);
+    const o = { x: r.x, z: r.z }; pushFromBlocks(o, 0.3, r.y + 0.05, r.y + 0.7); r.x = o.x; r.z = o.z;
+    r.y += (floorY(r.x, r.z, r.y) - r.y) * Math.min(1, dt * 12); r.phase += sp * dt * 6;
+    r.g.position.set(r.x, r.y + Math.abs(Math.sin(r.phase)) * 0.03, r.z); r.g.rotation.y = r.heading;
+  }
+}
+function say(name: string, tierLabel: string, text: string) {
+  $('spName').textContent = name; $('spTier').textContent = tierLabel; $('spText').textContent = text;
+  const el = $('speech'); el.classList.add('show'); clearTimeout(speechTimer); speechTimer = window.setTimeout(() => el.classList.remove('show'), 6500);
+}
+function hasCosts(costs: readonly ItemCost[] = []) { return costs.every(cost => countItem(cost.id) >= cost.count); }
+function consumeCosts(costs: readonly ItemCost[] = []) { for (const cost of costs) removeItems(cost.id, cost.count); renderHot(); updateHeld(); }
+function closeDialogue() { $('dialogue').classList.add('hidden'); uiOpen = false; if (state === 'dialogue') state = 'play'; renderGoal(); }
+function dialogueButtons(buttons: { label: string; primary?: boolean; disabled?: boolean; run: () => void }[]) {
+  const actions = $('dialogueActions'); actions.innerHTML = '';
+  for (const def of buttons) { const button = document.createElement('button'); button.textContent = def.label; button.className = def.primary ? 'primary' : ''; button.disabled = !!def.disabled; button.addEventListener('click', def.run); actions.appendChild(button); }
+}
+function showQuestConversation(cue: ConversationCue) {
+  state = 'dialogue'; uiOpen = true; if (document.exitPointerLock) document.exitPointerLock(); for (const k in keys) keys[k] = false; mouseHeld = false;
+  $('dialogueName').textContent = 'Bramble'; $('dialogueText').textContent = cue.text; $('dialogue').classList.remove('hidden');
+  const finish = (text: string) => { $('dialogueText').textContent = text; dialogueButtons([{ label: 'Close', primary: true, run: closeDialogue }]); renderGoal(); if (journalOpen) renderJournal(); };
+  if (cue.kind === 'offer') {
+    dialogueButtons([
+      { label: 'Not now', run: closeDialogue },
+      { label: cue.action, primary: true, run: () => { if (acceptQuest(story, cue.quest.id, dayNow(), progress)) finish(cue.after); else closeDialogue(); } }
+    ]);
+  } else {
+    const ready = hasCosts(cue.items);
+    dialogueButtons([
+      { label: 'Not yet', run: closeDialogue },
+      { label: cue.action, primary: true, disabled: !ready, run: () => { if (!hasCosts(cue.items)) return; consumeCosts(cue.items); note(cue.event!); finish(cue.after); } }
+    ]);
+  }
+}
+const dayNow = () => Math.floor(todT / DAY_LEN) + 1;
+function dialogueFlags() { const flags = new Set(progress); for (const id of story.completed) flags.add('quest:' + id); for (const id of story.lore) flags.add('lore:' + id); return flags; }
+function talkTo(r: Resident) {
+  const questCue = residentConversation(story, progress, r.id); if (questCue) { showQuestConversation(questCue); return; }
+  const def = RESIDENTS[r.id], before = tierOf(friends[r.id].friendship), res = talkStep(friends[r.id], dayNow());
+  friends[r.id] = res.friend;
+  const tier = tierOf(res.friend.friendship);
+  const line = pickLine(candidateLines(def, { day: dayNow(), night: TOD.night > 0.35, tier, flags: dialogueFlags() }), res.friend.lastLine);
+  res.friend.lastLine = line.id;
+  let text = line.text;
+  if (tier > before) text += '  (' + def.name + ' now counts you as a ' + TIER_NAMES[tier].toLowerCase() + '.)';
+  if (res.present) {
+    const gifts = presentFor(def, res.friend.friendship);
+    if (gifts) { for (const [id, n] of Object.entries(gifts)) giveItem(id, n); text += '  Here, I found these for you.'; }
+  }
+  say(def.name, TIER_NAMES[tier], text); note('talk:' + r.id); sfx.pickup();
+}
+function giftTo(r: Resident) {
+  const def = RESIDENTS[r.id], s = inv[sel], d = s ? ITEMS[s.id] : null;
+  if (!s || !d) { toast('Hold an item in your hand to give it (G)', false, 1600); return; }
+  if (d.k === 'tool' || d.k === 'shield' || d.k === 'station') { toast(def.name + ' has no use for that', false, 1600); return; }
+  const res = giveGift(def, friends[r.id], s.id, dayNow());
+  if (res.accepted) { friends[r.id] = res.friend; s.n--; if (s.n <= 0) inv[sel] = null; renderHot(); updateHeld(); note('gift:' + r.id); sfx.pickup(); }
+  say(def.name, TIER_NAMES[tierOf(friends[r.id].friendship)], res.reaction);
+}
+
 /* ================= journal, collection log and dawn card ================= */
 const progress = createProgress();
-let tally = newTally(), journalOpen = false, journalTab: 'goals' | 'log' = 'goals', dawnTimer = 0, goalFlash = 0;
+let tally = newTally(), journalOpen = false, journalTab: 'quests' | 'lore' | 'log' = 'quests', dawnTimer = 0, goalFlash = 0;
+function objectiveText(questId: string) {
+  const current = currentObjectives(story, questId).find(row => !row.done), active = story.active[questId];
+  if (!current || !active) return null;
+  const need = current.objective.count ?? 1, count = need > 1 ? ' ' + Math.min(current.value, need) + '/' + need : '';
+  const site = story.tracked === questId ? trackedStorySite() : null, nav = site ? ' - ' + navigationTo(site, P.x, P.z) : '';
+  return current.objective.text + count + nav;
+}
 function renderGoal() {
   if (performance.now() < goalFlash) return;
+  if (story.tracked && story.active[story.tracked]) {
+    const quest = questById(story.tracked), text = objectiveText(story.tracked);
+    if (quest && text) { $('goalArc').textContent = quest.title; $('goalStep').textContent = text; return; }
+  }
   const n = nextStep(progress);
   $('goalArc').textContent = n ? n.arc.title + '  ' + arcProgress(progress, n.arc).done + '/' + n.arc.steps.length : 'Journal complete';
   $('goalStep').textContent = n ? n.step.text : 'Every goal is done. The forest is yours.';
 }
 /** Records progress. The first time a key is seen it may complete a goal, add a log entry or finish a chapter. */
 function note(key: string) {
-  if (!record(progress, key)) return;
+  const questUpdates = recordQuestEvent(story, { key, day: dayNow() });
+  for (const update of questUpdates) {
+    for (const reward of update.rewards) giveItem(reward.id, reward.count);
+    const quest = questById(update.questId);
+    if (update.questCompleted && quest) setTimeout(() => toast('Quest complete: ' + quest.title, false, 3400), 250);
+    else if (update.intro) { const text = update.intro; setTimeout(() => toast(text, false, 3000), 250); }
+  }
+  const fresh = record(progress, key);
+  if (!fresh) { if (questUpdates.length) { renderGoal(); if (journalOpen) renderJournal(); } return; }
   const name = discoveryName(key); if (name) tally.discoveries.push(name);
   const done = completedBy(progress, key);
   if (done.steps.length) {
@@ -1035,9 +1359,28 @@ function note(key: string) {
 }
 function renderJournal() {
   const body = $('jBody'); body.innerHTML = '';
-  $('jtGoals').classList.toggle('on', journalTab === 'goals'); $('jtLog').classList.toggle('on', journalTab === 'log');
+  $('jtGoals').classList.toggle('on', journalTab === 'quests'); $('jtLore').classList.toggle('on', journalTab === 'lore'); $('jtLog').classList.toggle('on', journalTab === 'log');
   const c = logCounts(progress); $('jCount').textContent = c.found + '/' + c.total;
-  if (journalTab === 'goals') {
+  if (journalTab === 'quests') {
+    if (!story.enabled) { const msg = document.createElement('div'); msg.className = 'emptyStory'; msg.textContent = 'Story landmarks are available in newly generated worlds. This world and everything you built in it remain unchanged.'; body.appendChild(msg); }
+    else {
+      const addQuest = (questId: string, label: string) => {
+        const quest = questById(questId); if (!quest) return;
+        const wrap = document.createElement('section'); wrap.className = 'quest';
+        const h = document.createElement('h3'); h.textContent = quest.title + ' '; const small = document.createElement('small'); small.textContent = label; h.appendChild(small); wrap.appendChild(h);
+        const p = document.createElement('p'); p.textContent = quest.summary; wrap.appendChild(p);
+        if (story.active[questId]) {
+          for (const row of currentObjectives(story, questId)) { const line = document.createElement('div'); line.className = 'stp' + (row.done ? ' done' : ' now'); const need = row.objective.count ?? 1; line.textContent = row.objective.text + (need > 1 ? ' ' + Math.min(row.value, need) + '/' + need : ''); wrap.appendChild(line); }
+          const actions = document.createElement('div'); actions.className = 'qactions'; const track = document.createElement('button'); track.textContent = story.tracked === questId ? 'Tracked' : 'Track'; track.className = story.tracked === questId ? 'primary' : ''; track.disabled = story.tracked === questId; track.addEventListener('click', () => { story.tracked = questId; renderGoal(); renderJournal(); }); actions.appendChild(track); wrap.appendChild(actions);
+        } else if (questStatus(quest, story, progress) === 'available') { const hint = document.createElement('div'); hint.className = 'stp now'; hint.textContent = 'Talk to Bramble to begin'; wrap.appendChild(hint); }
+        else { const done = document.createElement('div'); done.className = 'stp done'; done.textContent = quest.completeText; wrap.appendChild(done); }
+        body.appendChild(wrap);
+      };
+      for (const id of Object.keys(story.active)) addQuest(id, questById(id)?.kind === 'side' ? 'Side quest' : 'Main quest');
+      for (const quest of availableQuests(story, progress)) addQuest(quest.id, quest.kind === 'side' ? 'Available side quest' : 'Available main quest');
+      for (const id of story.completed) addQuest(id, 'Completed');
+    }
+    const head = document.createElement('div'); head.className = 'logsec'; head.innerHTML = '<h3>Field Guide</h3>'; body.appendChild(head);
     const cur = nextStep(progress);
     for (const arc of ARCS) {
       const pr = arcProgress(progress, arc), wrap = document.createElement('div'); wrap.className = 'arc';
@@ -1045,6 +1388,10 @@ function renderJournal() {
       for (const s of arc.steps) { const d = document.createElement('div'); d.className = 'stp' + (stepDone(progress, s) ? ' done' : cur && cur.step === s ? ' now' : ''); d.textContent = s.text; wrap.appendChild(d); }
       body.appendChild(wrap);
     }
+  } else if (journalTab === 'lore') {
+    if (!story.lore.length) { const empty = document.createElement('div'); empty.className = 'emptyStory'; empty.textContent = story.enabled ? 'Stories you uncover will be kept here.' : 'This older world has no generated story landmarks.'; body.appendChild(empty); }
+    for (const id of story.lore) { const entry = loreById(id); if (!entry) continue; const wrap = document.createElement('article'); wrap.className = 'lore'; const h = document.createElement('h3'); h.textContent = entry.title; const p = document.createElement('p'); p.textContent = entry.body; wrap.append(h, p); body.appendChild(wrap); }
+    if (story.keepsakes.length) { const wrap = document.createElement('article'); wrap.className = 'lore'; const h = document.createElement('h3'); h.textContent = 'Keepsakes'; const p = document.createElement('p'); p.textContent = story.keepsakes.map(id => id === 'listening-lens' ? 'Listening Lens' : id === 'old-hearth-key' ? 'Old Hearth Key' : id).join(', '); wrap.append(h, p); body.appendChild(wrap); }
   } else {
     const titles = { items: 'Things', places: 'Places', creatures: 'Creatures' } as const;
     for (const sec of ['items', 'places', 'creatures'] as const) {
@@ -1072,7 +1419,8 @@ function showDawn(lines: string[]) {
 }
 $('dawn').addEventListener('click', () => $('dawn').classList.remove('show'));
 $('goal').addEventListener('click', () => { if (state === 'play') toggleJournal(); });
-$('jtGoals').addEventListener('click', () => { journalTab = 'goals'; renderJournal(); });
+$('jtGoals').addEventListener('click', () => { journalTab = 'quests'; renderJournal(); });
+$('jtLore').addEventListener('click', () => { journalTab = 'lore'; renderJournal(); });
 $('jtLog').addEventListener('click', () => { journalTab = 'log'; renderJournal(); });
 
 /* ================= input ================= */
@@ -1082,9 +1430,11 @@ addEventListener('keydown', e => {
   if (e.repeat && e.code !== 'KeyF') { if (['Space', 'Tab'].includes(e.code)) e.preventDefault(); return; }
   keys[e.code] = true;
   if (['Space', 'Tab', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
+  if (e.code === 'Escape' && state === 'dialogue') { closeDialogue(); return; }
   if (state !== 'play' && state !== 'menu') return;
   if (e.code === 'Tab' || e.code === 'KeyI' || e.code === 'KeyC') { if (state === 'play') { if (journalOpen) toggleJournal(false); else toggleInv(); } }
   else if (e.code === 'KeyJ') { if (state === 'play') toggleJournal(); }
+  else if (e.code === 'KeyG') { if (state === 'play' && !uiOpen && (aim.type as Aim['type']) === 'resident' && aim.resident && aim.ok) giftTo(aim.resident); }
   else if (e.code === 'Escape' && uiOpen) { if (journalOpen) toggleJournal(false); else toggleInv(false); }
   else if (e.code === 'KeyE' && state === 'play') interact();
   else if (e.code === 'KeyM') { setMuted(!audioState.muted); }
@@ -1231,13 +1581,14 @@ function updateWorld(dt: number, t: number) {
     if (f.t > 1.6) { const s = Math.max(0.001, 1 - (f.t - 1.6) * 2); f.m.scale.multiplyScalar(0.94); if (f.t > 2.4) { f.m.visible = false; falling.splice(i, 1); } }
   }
   /* stations: flames and lights */
-  const lightable = stations.filter(b => b.t === 'camp' || b.t === 'furnace' || b.t === 'torch').map(b => ({ b, d: Math.hypot(b.i + 0.5 - P.x, b.k + 0.5 - P.z) + Math.abs(b.j - P.y) * 0.5 })).sort((a, b) => a.d - b.d);
+  const lightable = stations.filter(b => b.t === 'camp' || b.t === 'furnace' || b.t === 'torch' || b.t === 'lantern').map(b => ({ b, d: Math.hypot(b.i + 0.5 - P.x, b.k + 0.5 - P.z) + Math.abs(b.j - P.y) * 0.5 })).sort((a, b) => a.d - b.d);
   for (const b of stations) {
     if (b.t === 'camp' || b.t === 'torch') { const fl = b.obj!.userData.flames, f = 1 + Math.sin(t * 13 + b.i) * 0.14 + Math.sin(t * 7.3) * 0.1; fl[0].scale.set(f, 1 + Math.sin(t * 9) * 0.2, f); if (b.t === 'camp') fl[1].scale.set(f * 0.9, 1 + Math.sin(t * 11 + 1) * 0.25, f * 0.9); b.obj!.userData.glowSp.scale.setScalar((b.t === 'camp' ? 2.2 : 1.1) + Math.sin(t * 8) * 0.12); }
+    if (b.t === 'lantern') { b.obj!.userData.core.rotation.y = t * 0.5; b.obj!.userData.glowSp.scale.setScalar(2.2 + Math.sin(t * 2.2) * 0.08); }
   }
   for (let i = 0; i < 4; i++) {
     const l = fireLights[i], e = lightable[i];
-    if (e && e.d < 40) { const cfg = e.b.t === 'camp' ? [0xff9a3c, 1.9, 24, 0.9] : e.b.t === 'torch' ? [0xffb060, 1.2, 15, 0.9] : [0xff7a20, 0.9, 24, 1.2]; l.position.set(e.b.i + 0.5, e.b.j + cfg[3], e.b.k + 0.5); l.color.set(cfg[0]); l.distance = cfg[2]; l.intensity = cfg[1] * (1 + Math.sin(t * 12 + i * 3) * 0.12); } else l.intensity = 0;
+    if (e && e.d < 40) { const cfg = e.b.t === 'camp' ? [0xff9a3c, 1.9, 24, 0.9] : e.b.t === 'torch' ? [0xffb060, 1.2, 15, 0.9] : e.b.t === 'lantern' ? [0x70e8ff, 2.2, 28, 0.55] : [0xff7a20, 0.9, 24, 1.2]; l.position.set(e.b.i + 0.5, e.b.j + cfg[3], e.b.k + 0.5); l.color.set(cfg[0]); l.distance = cfg[2]; l.intensity = cfg[1] * (e.b.t === 'lantern' ? 1 : 1 + Math.sin(t * 12 + i * 3) * 0.12); } else l.intensity = 0;
   }
 }
 function updateAimVisuals() {
@@ -1253,8 +1604,10 @@ function updateAimVisuals() {
     prompt = id === B.BEDROCK ? 'Bedrock' : bd.need > 0 ? 'Mine ' + bd.n.toLowerCase() + (bd.need >= 2 ? ' (stone pickaxe)' : ' (pickaxe)') : (bd.tool === 'axe' ? 'Chop ' : 'Dig ') + bd.n.toLowerCase();
     if (mining && mining.key === key(i, j, k) && id !== B.BEDROCK) prompt += '  ' + Math.round((1 - mining.hp / mining.max) * 100) + '%';
   } else if (aim.ok && aim.type === 'block' && aim.block) {
-    const b = aim.block; selBox.visible = true; selBox.position.set(b.i + 0.5, b.j + 0.5, b.k + 0.5); prompt = b.t === 'bench' ? 'Workbench (E to craft)' : b.t === 'furnace' ? 'Furnace (E to craft)' : b.t === 'camp' ? 'Campfire (E to cook)' : b.t === 'bed' ? 'Bed (E to sleep at night)' : b.t === 'crop' ? (isRipe(b.growth ?? 0) ? 'Thistle root, ripe (E to harvest)' : STAGE_NAMES[cropStage(b.growth ?? 0)] + (b.wet ? '' : ', dry: grows slowly') + ' (hit to uproot)') : b.t === 'torch' ? 'Pick up torch' : 'Break block';
+    const b = aim.block; selBox.visible = true; selBox.position.set(b.i + 0.5, b.j + 0.5, b.k + 0.5); prompt = b.t === 'bench' ? 'Workbench (E to craft)' : b.t === 'furnace' ? 'Furnace (E to craft)' : b.t === 'camp' ? 'Campfire (E to cook)' : b.t === 'bed' ? 'Bed (E to sleep at night)' : b.t === 'door' ? ((b.link ?? b).open ? 'Door, open (E to close)' : 'Door, closed (E to open)') : b.t === 'crop' ? (isRipe(b.growth ?? 0) ? 'Thistle root, ripe (E to harvest)' : STAGE_NAMES[cropStage(b.growth ?? 0)] + (b.wet ? '' : ', dry: grows slowly') + ' (hit to uproot)') : b.t === 'torch' ? 'Pick up torch' : b.t === 'lantern' ? 'Rootward Lantern' : 'Break block';
   } else if (aim.ok && aim.type === 'enemy') prompt = 'Gloom beetle';
+  else if (aim.ok && (aim.type as Aim['type']) === 'site' && aim.site) prompt = aim.site.siteId === 'listening' ? 'Listen to the standing stone (E)' : (story.sites.door?.repaired ? 'Knock on the old door (E)' : 'Examine the ruined door (E)');
+  else if (aim.ok && (aim.type as Aim['type']) === 'resident' && aim.resident) prompt = 'Talk to ' + RESIDENTS[aim.resident.id].name + ' (E), give held item (G)';
   const pe = $('prompt'); if (prompt) { pe.textContent = prompt; pe.classList.add('on'); } else pe.classList.remove('on');
 }
 const hud = { n: '', d: '', c: '' };
@@ -1271,32 +1624,41 @@ function updateHUD() {
 }
 
 /* ================= saving ================= */
-const SAVE_KEY = 'thistlewick-save-v1'; let storageOK = false, hasSave = false, saveT = 30;
-try { localStorage.setItem('tw-test', '1'); localStorage.removeItem('tw-test'); storageOK = true; } catch (e) { storageOK = false; }
-function peekSave() { if (!storageOK) return false; try { const d = migrateSave(JSON.parse(localStorage.getItem(SAVE_KEY) || 'null')); return !!d; } catch (e) { return false; } }
-function clearSave() { try { localStorage.removeItem(SAVE_KEY); } catch (e) {} }
+const SAVE_KEY = 'thistlewick-save-v1'; let hasSave = false, saveT = 30, savedText: string | null = null;
+/* the newest of localStorage and IndexedDB wins; a world too big for localStorage keeps saving to IndexedDB */
+const backends: Backend[] = [];
+try { backends.push(localBackend(SAVE_KEY, localStorage)); } catch (e) { /* storage blocked */ }
+try { backends.push(idbBackend(indexedDB, 'thistlewick', SAVE_KEY)); } catch (e) { /* no IndexedDB */ }
+const store = createStore(backends);
+function peekSave() { try { return !!migrateSave(JSON.parse(savedText || 'null')); } catch (e) { return false; } }
+function clearSave() { savedText = null; void store.clear(); }
 function saveGame() {
-  if (!storageOK) return false;
   try {
-    const e: number[] = []; for (const v of edits.values()) e.push(v.i, v.j, v.k, v.id);
-    const d: SaveV2 = { v: 2, journal: [...progress], P: { x: P.x, y: P.y, z: P.z, hp: P.hp, hunger: P.hunger, stamina: P.stamina, heading: P.heading, spawnX: P.spawnX, spawnZ: P.spawnZ }, todT, sel, inv: inv.map(s => s ? [s.id, s.n, s.dur] as [string, number, number | undefined] : null), tips, edits: e,
+    chronicle = compact(chronicle, MAX_EVENTS);
+    const d: SaveV5 = { v: 5, events: encode(chronicle), worldSeed: world.seed, genVersion: world.genVersion, journal: [...progress], story, P: { x: P.x, y: P.y, z: P.z, hp: P.hp, hunger: P.hunger, stamina: P.stamina, heading: P.heading, spawnX: P.spawnX, spawnZ: P.spawnZ }, todT, sel, inv: inv.map(s => s ? [s.id, s.n, s.dur] as [string, number, number | undefined] : null), tips,
       stations: stations.filter(b => b.t !== 'crop').map(b => [b.t, b.i, b.j, b.k]),
+      friends, homes: Object.fromEntries(residents.map(r => [r.id, r.home])),
       crops: cropStations().map(b => [b.i, b.j, b.k, Math.round(b.growth ?? 0)] as [number, number, number, number]), collected: [...collected], dead: [...deadNodes] };
-    localStorage.setItem(SAVE_KEY, JSON.stringify(d)); return true;
+    savedText = JSON.stringify(d); void store.save(savedText); return true;
   } catch (err) { return false; }
 }
 function loadGame() {
-  let d: SaveV2 | null; try { d = migrateSave(JSON.parse(localStorage.getItem(SAVE_KEY) || 'null')); } catch (e) { return false; } if (!d) return false;
+  let d: SaveV5 | null; try { d = migrateSave(JSON.parse(savedText || 'null')); } catch (e) { return false; } if (!d) return false;
   try {
+    applyWorld(d.worldSeed, d.genVersion);
+    story = d.story; loreSites = story.enabled ? makeStorySites(d.worldSeed, d.genVersion) : []; rebuildStorySiteVisuals();
     const p = d.P; P.x = p.x; P.z = p.z; P.y = p.y; P.hp = Math.max(20, p.hp); P.hunger = p.hunger; P.stamina = p.stamina; P.heading = p.heading; P.spawnX = p.spawnX; P.spawnZ = p.spawnZ; P.vx = P.vz = P.vy = 0;
     Object.assign(tips, d.tips || {}); for (const id of d.collected || []) collected.add(id); for (const k of d.dead || []) deadNodes.add(k);
-    for (let q = 0; q + 3 < d.edits.length; q += 4) setVox(d.edits[q], d.edits[q + 1], d.edits[q + 2], d.edits[q + 3]);
+    chronicle = decode(d.events); sinceDawn.length = 0;
+    for (const e of chronicle) applyVox(e.i, e.j, e.k, e.id);
     inv.fill(null); (d.inv || []).forEach((s, i) => { if (s && ITEMS[s[0]] && i < 24) inv[i] = { id: s[0], n: s[1], dur: s[2] }; });
     todT = d.todT; sel = (d.sel | 0) % 8; progress.clear(); for (const k of d.journal) progress.add(k); tally = newTally();
     for (const ch of chunks.values()) disposeChunk(ch); chunks.clear();
     ensureChunks(true);
     for (const s of d.stations || []) if (BDEF[s[0]]) placeStation(s[1], s[2], s[3], s[0] as StationKind);
     for (const c of d.crops || []) placeStation(c[0], c[1], c[2], 'crop', c[3]);
+    Object.assign(friends, d.friends || {}); for (const [id, home] of Object.entries(d.homes || {})) if (RESIDENTS[id]) spawnResident(id, home, []);
+    homeT = 0;
     if (solid(Math.floor(P.x), Math.floor(P.y + 0.1), Math.floor(P.z)) || solid(Math.floor(P.x), Math.floor(P.y + 1.2), Math.floor(P.z))) P.y = surf(P.x, P.z);
     P.grounded = false; camTarget.set(P.x, P.y + 1.25, P.z);
     return true;
@@ -1309,6 +1671,7 @@ addEventListener('pagehide', () => { if (state === 'play') saveGame(); });
 function startGame(fresh: boolean) {
   if (fresh === undefined) fresh = true;
   if (!ready) return; initAudio(); resumeAudio();
+  if (fresh) { applyWorld(randomSeed(), GEN_VERSION); story = createStorySave(true); loreSites = makeStorySites(world.seed, world.genVersion); rebuildStorySiteVisuals(); ensureChunks(true); P.y = surf(P.x, P.z); P.grounded = false; }
   $('start').classList.add('hidden'); $('hud').classList.remove('hidden'); if (isTouch) { $('touch').classList.remove('hidden'); $('xh').classList.add('on'); }
   progress.add('biome:' + WG.terr(Math.floor(P.x), Math.floor(P.z)).biome); renderGoal();
   state = 'play'; camTarget.set(P.x, P.y + 1.25, P.z); renderHot(); updateHeld();
@@ -1345,7 +1708,7 @@ function frame(now: number) {
   ensureChunks(false);
   { let nb = 0; for (const ch of chunks.values()) if (ch.dirty && nb < 2) { ch.dirty = false; buildGround(ch); nb++; } }
   { let cov = false; if (state === 'play') { const ci = Math.floor(P.x), ck = Math.floor(P.z), j0 = Math.floor(P.y + PHGT); for (let j = j0; j < j0 + 14; j++) if (solid(ci, j, ck)) { cov = true; break; } } ugU += ((cov ? 1 : 0) - ugU) * Math.min(1, dt * 2.5); }
-  updateTOD(); updateEnemies(dt, T); updateCritters(dt); updateWorld(dt, T);
+  updateTOD(); if (state !== 'dialogue') { updateEnemies(dt, T); updateCritters(dt); updateResidents(dt, T); updateBossBar(); } updateWorld(dt, T); updateStorySites(T);
   sun.target.position.set(P.x, P.y, P.z); sun.position.set(P.x + TOD.dir.x * 160, P.y + TOD.dir.y * 160, P.z + TOD.dir.z * 160);
   animateGnome(dt, T); updateHeld();
   updateCamera(dt, T); sky.position.copy(camera.position);
@@ -1355,7 +1718,7 @@ function frame(now: number) {
     if (state === 'play') { note('biome:' + bb); if (ugU > 0.6 && H(P.x, P.z) - P.y >= 4) note('cave'); } }
   if (state === 'play') { computeAim(); }
   updateAimVisuals(); updateShafts(T); updateMotes(dt, T); updateFlies(dt, T); updateParts(dt);
-  for (const e of enemies) if (e.bar) e.bar.visible = !e.dying && e.hp < e.max;
+  for (const e of enemies) if (e.bar) e.bar.visible = !e.dying && e.hp < e.max && !e.boss;
   if (audioReady() && state === 'play' && TOD.night > 0.3 && Math.random() < dt * 0.6) sfx.chirp();
   if (state === 'play') { saveT -= dt; if (saveT <= 0) { saveGame(); saveT = 30; } }
   if (state === 'play' || state === 'dead') updateHUD();
@@ -1376,12 +1739,43 @@ if (new URLSearchParams(location.search).has('debug')) {
     crops: () => cropStations().map(b => ({ stage: cropStage(b.growth ?? 0), wet: !!b.wet })),
     progress: () => [...progress],
     night: () => TOD.night,
-    hp: () => P.hp
+    spawnBoss() { for (let n = 0; n < 40 && !enemies.some(e => !!e.boss); n++) spawnBoss(dayNow()); return enemies.some(e => !!e.boss); },
+    boss: () => { const b = enemies.find(e => !!e.boss); return b ? { hp: b.hp, max: b.max, phase: b.boss!.phase, enraged: b.boss!.enraged } : null; },
+    hitBoss(dmg: number) { const b = enemies.find(e => !!e.boss); if (b) hitEnemy(b, { d: null, chop: 0, mine: 0, dmg, range: 2, blockPow: 0 }); },
+    count: (id: string) => countItem(id),
+    /** Builds a sealed 5x5x3 stone hut east of the player with a door, a bed, a torch and a workbench. */
+    buildCottage() {
+      const ox = Math.floor(P.x) + 9, oz = Math.floor(P.z); let j0 = -99;
+      for (let a = -3; a <= 3; a++) for (let b = -3; b <= 3; b++) j0 = Math.max(j0, surf(ox + a + 0.5, oz + b + 0.5));
+      for (let a = -3; a <= 3; a++) for (let b = -3; b <= 3; b++) for (let j = j0 - 1; j <= j0 + 3; j++) {
+        const shell = Math.abs(a) === 3 || Math.abs(b) === 3 || j === j0 - 1 || j === j0 + 3;
+        setVox(ox + a, j, oz + b, shell ? B.STONE : 0);
+      }
+      setVox(ox - 3, j0, oz, 0); setVox(ox - 3, j0 + 1, oz, 0);
+      placeStation(ox - 3, j0, oz, 'door');
+      placeStation(ox - 2, j0, oz - 2, 'bed'); placeStation(ox + 2, j0, oz - 2, 'bench'); placeStation(ox, j0, oz + 2, 'torch');
+      return { ox, oz, j0 };
+    },
+    breakRoof(c: { ox: number; oz: number; j0: number }) { setVox(c.ox, c.j0 + 3, c.oz, 0); },
+    checkHomesNow() { checkHomes(); },
+    /** Toggles the door and reports whether both of its cells now block movement. */
+    toggleDoor(c: { ox: number; oz: number; j0: number }) { const d = stations.find(b => b.t === 'door'); if (d) toggleDoor(d); return { open: !!d?.open, solidLow: solid(c.ox - 3, c.j0, c.oz), solidHigh: solid(c.ox - 3, c.j0 + 1, c.oz) }; },
+    residents: () => residents.map(r => ({ id: r.id, x: r.x, z: r.z })),
+    friend: (id: string) => friends[id]?.friendship ?? -1,
+    talk() { if (residents[0]) talkTo(residents[0]); },
+    gift(id: string) { giveItem(id, 1); sel = inv.findIndex(s => s && s.id === id); if (residents[0]) giftTo(residents[0]); },
+    speech: () => ($('speech').classList.contains('show') ? $('spText').textContent : ''),
+    hp: () => P.hp,
+    chronicle: () => ({ events: chronicle.length, sinceDawn: summarize(sinceDawn) }),
+    dig() { const i = Math.floor(P.x) + 3, k = Math.floor(P.z); setVox(i, surf(i + 0.5, k + 0.5) - 1, k, 0); setVox(i + 1, surf(i + 1.5, k + 0.5), k, B.STONE); },
+    world: () => ({ seed: world.seed, genVersion: world.genVersion })
   };
 }
 
 requestAnimationFrame(() => {
   ensureChunks(true); renderHot();
-  ready = true; ($('goBtn') as HTMLButtonElement).disabled = false; hasSave = peekSave(); $('goBtn').textContent = hasSave ? 'Continue' : 'Begin'; if (hasSave) $('newBtn').classList.remove('hidden');
+  store.load().then(text => { savedText = text; }, () => { /* start without a save */ }).then(() => {
+    ready = true; ($('goBtn') as HTMLButtonElement).disabled = false; hasSave = peekSave(); $('goBtn').textContent = hasSave ? 'Continue' : 'Begin'; if (hasSave) $('newBtn').classList.remove('hidden');
+  });
 });
 requestAnimationFrame(frame);

@@ -29,6 +29,17 @@ export const ARCS: Arc[] = [
     ]
   },
   {
+    id: 'home', title: 'A Place to Call Home', blurb: 'Walls, a roof and a door. Somebody might be glad of them.',
+    steps: [
+      { id: 'door', text: 'Craft a door at your workbench', key: 'craft:door' },
+      { id: 'placeDoor', text: 'Place the door in a wall (it takes two blocks of height)', key: 'place:door' },
+      { id: 'cottage', text: 'Seal a room with a bed, a light and a workbench inside', key: 'cottage' },
+      { id: 'resident', text: 'Wait for a visitor to move in', key: 'resident:bramble' },
+      { id: 'talk', text: 'Talk to your new neighbour (E)', key: 'talk:bramble' },
+      { id: 'gift', text: 'Give them a gift (G with an item in hand)', key: 'gift:bramble' }
+    ]
+  },
+  {
     id: 'forge', title: 'Iron and Fire', blurb: 'Stone bends to a good pickaxe, and iron bends to a hotter fire.',
     steps: [
       { id: 'stone', text: 'Break rock for stone', key: 'got:stone' },
@@ -46,7 +57,9 @@ export const ARCS: Arc[] = [
       { id: 'torch', text: 'Craft torches from coal and sticks', key: 'craft:torch' },
       { id: 'crystal', text: 'Find a glow crystal in the cave walls', key: 'got:crystal' },
       { id: 'beetle', text: 'Defeat a gloom beetle', key: 'kill:beetle' },
-      { id: 'cshield', text: 'Craft a carapace shield from beetle shells', key: 'craft:cshield' }
+      { id: 'cshield', text: 'Craft a carapace shield from beetle shells', key: 'craft:cshield' },
+      { id: 'elder', text: 'Face the Elder Beetle. It wakes on the third night and slams hard, so strike when it recovers', key: 'kill:elder' },
+      { id: 'eshield', text: 'Craft an Elder shield from its carapace, iron and crystal', key: 'craft:eshield' }
     ]
   }
 ];
