@@ -1,0 +1,110 @@
+# Deploy the production build to Cloudflare Pages.
+#
+# I. Why direct upload instead of the Pages Git integration
+#
+# Both paths are supported and `wrangler.toml` describes the shared settings.
+# Direct upload is used here because it makes the pipeline explicit and
+# repeatable: the artefact is built once, in the same job that uploads it, so the
+# deployed revision is always traceable to a commit and cannot drift from what
+# CI verified.
+#
+# II. Required repository secrets
+#
+#   CLOUDFLARE_API_TOKEN   token with the "Cloudflare Pages: Edit" permission
+#   CLOUDFLARE_ACCOUNT_ID  account id that owns the Pages project
+#
+# Set them under Settings -> Secrets and variables -> Actions.
+#
+# III. Behaviour when the secrets are missing
+#
+# The build always runs, because a broken production build must fail the
+# workflow. Only the upload step is skipped, with an explicit notice pointing at
+# the README. Failing the whole workflow instead would paint `main` red for a
+# condition that is a configuration choice rather than a defect, which trains
+# people to ignore a red badge.
+
+name: Deploy to Cloudflare Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Pages branch to deploy to (main creates a production deployment)'
+        required: false
+        default: 'main'
+
+permissions:
+  contents: read
+  deployments: write
+
+concurrency:
+  group: deploy-pages-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: '24'
+  PAGES_PROJECT: my-mc-v2
+
+jobs:
+  deploy:
+    name: Build & deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Check Cloudflare credentials
+        id: credentials
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if [ -n "${CLOUDFLARE_API_TOKEN}" ] && [ -n "${CLOUDFLARE_ACCOUNT_ID}" ]; then
+            echo "present=true" >> "${GITHUB_OUTPUT}"
+            echo "Cloudflare credentials found; the build will be published."
+          else
+            echo "present=false" >> "${GITHUB_OUTPUT}"
+            echo "::notice title=Cloudflare deployment skipped::CLOUDFLARE_API_TOKEN and/or CLOUDFLARE_ACCOUNT_ID are not configured. The production build succeeded; see README.md -> Deployment for how to enable publishing."
+          fi
+
+      - name: Upload production build
+        # Always available, so a skipped deployment can still be inspected.
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist-main
+          path: dist
+          retention-days: 7
+
+      - name: Deploy to Cloudflare Pages
+        if: steps.credentials.outputs.present == 'true'
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: >-
+            pages deploy dist
+            --project-name=${{ env.PAGES_PROJECT }}
+            --branch=${{ github.event.inputs.branch || 'main' }}
+            --commit-hash=${{ github.sha }}
+            --commit-message="${{ github.event.head_commit.message || github.sha }}"

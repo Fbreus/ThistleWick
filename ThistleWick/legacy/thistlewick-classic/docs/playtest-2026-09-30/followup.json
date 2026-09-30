@@ -1,0 +1,110 @@
+{
+  "autoPickupAtOneBlock": {
+    "item": "stone",
+    "distance": 1,
+    "collected": true,
+    "gained": 1
+  },
+  "normalOpeningCrafts": {
+    "treeHits": [
+      14,
+      13,
+      16,
+      14
+    ],
+    "inventory": [
+      {
+        "id": "wood",
+        "n": 9
+      },
+      {
+        "id": "plank",
+        "n": 1
+      },
+      {
+        "id": "waxe",
+        "n": 1,
+        "dur": 45
+      },
+      {
+        "id": "wpick",
+        "n": 1,
+        "dur": 45
+      },
+      {
+        "id": "stone",
+        "n": 1
+      },
+      {
+        "id": "bed",
+        "n": 1
+      },
+      {
+        "id": "mushroom",
+        "n": 3
+      },
+      {
+        "id": "cmush",
+        "n": 1
+      }
+    ],
+    "stations": [
+      "bench",
+      "camp"
+    ],
+    "next": "Craft a bed and place it near your fire"
+  },
+  "toolGates": {
+    "rockHpAfterHands": 13,
+    "rockMax": 13,
+    "oreHpAfterWoodPick": 18,
+    "oreMax": 18,
+    "toast": "Iron ore needs a stone pickaxe or better"
+  },
+  "berryRegenerationReset": {
+    "before": {
+      "ready": false,
+      "regrow": 90
+    },
+    "afterChunkRegeneration": {
+      "ready": true,
+      "regrow": 0
+    },
+    "saveHasBushTimers": false
+  },
+  "bossMinimumDrop": {
+    "carapace": 2,
+    "needed": 3,
+    "defeated": true,
+    "naturalRespawnAllowed": false
+  },
+  "deathLoss": {
+    "message": "You dropped half of your gathered resources. Your tools and shields are still with you.",
+    "inventory": [
+      {
+        "id": "eshell",
+        "n": 2
+      },
+      {
+        "id": "bed",
+        "n": 1
+      },
+      {
+        "id": "stone",
+        "n": 6
+      },
+      {
+        "id": "wpick",
+        "n": 1,
+        "dur": 40
+      }
+    ]
+  },
+  "foodEconomy": {
+    "daySeconds": 300,
+    "idleHungerPerDay": 72,
+    "roastMushroom": 34,
+    "bandageHeal": 35,
+    "bandageFiber": 3
+  }
+}

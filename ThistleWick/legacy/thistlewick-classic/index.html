@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Thistlewick</title>
+<!-- System serif fonts keep the game fully offline. -->
+<style>
+:root{
+  --ink:#10160b; --moss:#a9c58a; --amber:#f2b134; --paper:#f6ecd2; --berry:#e0523f; --hp:#d9483b; --food:#e6a23a; --sta:#8fbf5a;
+  --panel:rgba(14,19,9,.62); --line:rgba(246,236,210,.16);
+  color-scheme: dark;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;background:#0f1a0f;overflow:hidden;color:var(--paper);
+  font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  -webkit-user-select:none;user-select:none;touch-action:none;-webkit-tap-highlight-color:transparent}
+canvas{display:block;position:fixed;inset:0;width:100%;height:100%}
+.hidden{display:none!important}
+#flash{position:fixed;inset:0;pointer-events:none;opacity:0;background:radial-gradient(ellipse at center,transparent 30%,rgba(200,30,20,.7) 100%);transition:opacity .45s}
+#flash.on{opacity:1;transition:none}
+#fade{position:fixed;inset:0;pointer-events:none;opacity:0;background:#05080a;transition:opacity .8s;z-index:6}
+#fade.on{opacity:1}
+#xh{position:fixed;left:50%;top:50%;width:14px;height:14px;margin:-7px 0 0 -7px;border-radius:50%;border:2px solid rgba(246,236,210,.75);
+  box-shadow:0 0 0 1px rgba(0,0,0,.35);pointer-events:none;opacity:0}
+#xh.on{opacity:1}
+#prompt{position:fixed;left:50%;top:calc(50% + 26px);transform:translateX(-50%);font-size:14px;padding:5px 12px;border-radius:9px;background:rgba(10,14,7,.6);
+  border:1px solid var(--line);pointer-events:none;opacity:0;transition:opacity .12s;white-space:nowrap}
+#prompt.on{opacity:1}
+
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
+#bars{position:fixed;left:calc(14px + env(safe-area-inset-left,0px));bottom:calc(14px + env(safe-area-inset-bottom,0px));width:210px;padding:11px 13px}
+.b{margin-bottom:8px}.b:last-child{margin-bottom:0}
+.b span{display:flex;justify-content:space-between;font-size:12px;margin-bottom:3px;color:rgba(246,236,210,.88)}
+.bar{height:8px;border-radius:4px;background:rgba(255,255,255,.14);overflow:hidden}
+.bar i{display:block;height:100%;width:100%;border-radius:4px;transition:width .12s}
+#hpF{background:linear-gradient(90deg,#a92b23,var(--hp))}
+#fdF{background:linear-gradient(90deg,#c27d1a,var(--food))}
+#stF{background:linear-gradient(90deg,#5f9432,var(--sta))}
+#clockP{position:fixed;right:calc(14px + env(safe-area-inset-right,0px));top:calc(14px + env(safe-area-inset-top,0px));padding:9px 14px;text-align:right;font-size:13px}
+#clockP small{display:block;color:rgba(246,236,210,.72);margin-top:2px;font-size:12px}
+#stn{position:fixed;left:calc(14px + env(safe-area-inset-left,0px));top:calc(14px + env(safe-area-inset-top,0px));padding:9px 13px;font-size:12px;line-height:1.6;color:rgba(246,236,210,.85);transition:opacity 1s}
+#toast{position:fixed;left:50%;top:calc(64px + env(safe-area-inset-top,0px));transform:translate(-50%,-6px);opacity:0;
+  font:500 20px/1.25 'Fraunces',Georgia,serif;text-align:center;padding:9px 18px;border-radius:12px;background:rgba(12,16,8,.7);border:1px solid var(--line);
+  max-width:min(90vw,560px);transition:opacity .25s,transform .25s;pointer-events:none}
+#toast.show{opacity:1;transform:translate(-50%,0)}
+#toast.bad{border-color:rgba(230,80,40,.6);color:#ffd9b8}
+#goal{position:fixed;right:calc(14px + env(safe-area-inset-right,0px));top:calc(112px + env(safe-area-inset-top,0px));width:min(250px,60vw);padding:9px 13px;text-align:right;font-size:12px;line-height:1.45;cursor:pointer;pointer-events:auto}
+#goal b{display:block;font:500 13px 'Fraunces',Georgia,serif;color:var(--amber)}
+#goal span{display:block;color:rgba(246,236,210,.9)}
+#goal small{display:block;margin-top:3px;color:rgba(246,236,210,.55)}
+#goal small#goalNote{color:#d9efbf;margin-top:2px}
+#goal.flash{border-color:rgba(143,191,90,.8);box-shadow:0 0 14px rgba(143,191,90,.45)}
+#speech{position:fixed;left:50%;bottom:calc(92px + env(safe-area-inset-bottom,0px));transform:translate(-50%,6px);width:min(460px,90vw);padding:12px 16px;opacity:0;pointer-events:none;transition:opacity .3s,transform .3s;z-index:5}
+#speech.show{opacity:1;transform:translate(-50%,0)}
+#speech b{font:500 16px 'Fraunces',Georgia,serif;color:var(--amber)}
+#speech small{margin-left:8px;font-size:11px;color:rgba(246,236,210,.55)}
+#speech span{display:block;margin-top:4px;font-size:14px;line-height:1.5}
+#boss{position:fixed;left:50%;top:calc(14px + env(safe-area-inset-top,0px));transform:translateX(-50%);width:min(420px,58vw);padding:8px 14px;text-align:center;z-index:2}
+#boss b{display:block;font:500 15px 'Fraunces',Georgia,serif;margin-bottom:6px;color:#e2c6ff}
+#bossF{background:linear-gradient(90deg,#5a2a86,#a25bd6)}
+#dawn{position:fixed;left:50%;top:calc(18% + env(safe-area-inset-top,0px));transform:translate(-50%,-8px);width:min(420px,88vw);padding:18px 22px;text-align:center;opacity:0;pointer-events:none;transition:opacity .6s,transform .6s;z-index:5}
+#dawn.show{opacity:1;transform:translate(-50%,0);pointer-events:auto;cursor:pointer}
+#dawn h2{font:500 26px/1.2 'Fraunces',Georgia,serif;color:var(--amber);margin-bottom:8px}
+#dawn p{font-size:14px;line-height:1.55;margin-top:4px;color:rgba(246,236,210,.92)}
+#dawn p.next{margin-top:10px;color:#d9efbf}
+#journal{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(6,10,4,.55);z-index:4;padding:14px}
+#jBox{padding:18px;width:min(96vw,720px);max-height:min(92vh,640px);display:flex;flex-direction:column}
+#jTabs{display:flex;gap:8px;margin-bottom:12px}
+#jTabs button{font:600 13px system-ui;border:1px solid var(--line);border-radius:99px;padding:6px 14px;background:transparent;color:rgba(246,236,210,.75);cursor:pointer}
+#jTabs button.on{background:var(--amber);border-color:var(--amber);color:#1c1408}
+#jBody{overflow:auto;padding-right:6px;flex:1;min-height:160px}
+.arc{margin-bottom:16px}
+.arc h3{font:500 17px 'Fraunces',Georgia,serif;color:var(--amber);display:flex;justify-content:space-between;gap:10px}
+.arc h3 small{font:500 12px system-ui;color:rgba(246,236,210,.6)}
+.arc p{font-size:12px;color:rgba(246,236,210,.65);margin:2px 0 8px}
+.stp{font-size:13px;padding:4px 0 4px 26px;position:relative;color:rgba(246,236,210,.5)}
+.stp::before{content:'';position:absolute;left:4px;top:8px;width:11px;height:11px;border-radius:50%;border:2px solid rgba(246,236,210,.3)}
+.stp.done{color:rgba(246,236,210,.9)}
+.stp.done::before{background:var(--sta);border-color:var(--sta)}
+.stp.now{color:var(--paper);font-weight:600}
+.stp.now::before{border-color:var(--amber);box-shadow:0 0 8px rgba(242,177,52,.6)}
+.logsec h3{font:500 14px 'Fraunces',Georgia,serif;margin:12px 0 8px;color:var(--amber)}
+.logg{display:grid;grid-template-columns:repeat(auto-fill,minmax(112px,1fr));gap:8px}
+.le{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:10px;background:rgba(255,255,255,.05);font-size:12px;min-height:46px}
+.le img{width:30px;height:30px;flex:0 0 auto}
+.le .ph{width:30px;height:30px;flex:0 0 auto;border-radius:8px;background:rgba(255,255,255,.07);display:flex;align-items:center;justify-content:center;color:rgba(246,236,210,.35)}
+.le.no{color:rgba(246,236,210,.4)}
+.quest{padding:10px 0 12px;border-bottom:1px solid rgba(246,236,210,.1)}
+.quest:last-child{border-bottom:0}.quest h3{font:500 17px 'Fraunces',Georgia,serif;color:var(--amber);display:flex;align-items:center;gap:8px}.quest h3 small{font:600 10px system-ui;text-transform:uppercase;color:rgba(246,236,210,.5)}
+.quest p,.lore p{font-size:13px;line-height:1.55;color:rgba(246,236,210,.72);margin-top:4px}.qactions{display:flex;gap:8px;margin-top:8px}.qactions button,.dlgActions button{border:1px solid var(--line);background:rgba(255,255,255,.06);color:var(--paper);padding:7px 12px;border-radius:6px;cursor:pointer}.qactions button.primary,.dlgActions button.primary{background:var(--amber);border-color:var(--amber);color:#1c1408;font-weight:700}.qactions button:disabled,.dlgActions button:disabled{opacity:.4;cursor:default}
+.lore{padding:10px 0 14px;border-bottom:1px solid rgba(246,236,210,.1)}.lore h3{font:500 18px 'Fraunces',Georgia,serif;color:var(--amber)}.emptyStory{padding:24px 4px;color:rgba(246,236,210,.65);line-height:1.55}
+#dialogue{position:fixed;inset:0;display:flex;align-items:flex-end;justify-content:center;padding:24px 14px 92px;background:rgba(6,10,4,.35);z-index:8}#dialogueBox{width:min(560px,94vw);padding:16px 18px}#dialogueBox h2{font:500 20px 'Fraunces',Georgia,serif;color:var(--amber)}#dialogueText{font-size:14px;line-height:1.6;margin-top:7px;color:rgba(246,236,210,.92)}.dlgActions{display:flex;justify-content:flex-end;flex-wrap:wrap;gap:8px;margin-top:14px}
+
+#hotbar{position:fixed;left:50%;bottom:calc(14px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);display:flex;gap:6px;padding:8px}
+.slot{width:54px;height:54px;border-radius:9px;border:2px solid rgba(246,236,210,.16);background:rgba(255,255,255,.05);position:relative;display:flex;align-items:center;justify-content:center;cursor:pointer}
+.slot.sel{border-color:var(--amber);box-shadow:0 0 12px rgba(242,177,52,.5)}
+.slot.pick{border-color:var(--moss);box-shadow:0 0 10px rgba(169,197,138,.6)}
+.slot img{width:42px;height:42px;pointer-events:none}
+.slot .n{position:absolute;right:4px;bottom:2px;font:600 12px system-ui;text-shadow:0 1px 2px #000}
+.slot .k{position:absolute;left:4px;top:1px;font-size:10px;opacity:.6}
+.slot .d{position:absolute;left:6px;right:6px;bottom:3px;height:3px;border-radius:2px;background:rgba(0,0,0,.55);overflow:hidden}
+.slot .d i{display:block;height:100%;background:#8fd05a}
+
+#inv{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(6,10,4,.55);z-index:4;padding:14px}
+#invBox{display:flex;gap:18px;padding:18px;max-width:min(96vw,960px);max-height:min(92vh,640px);width:100%}
+#invL{flex:0 0 auto}
+#invR{flex:1;min-width:0;display:flex;flex-direction:column}
+#invBox h2{font:500 20px/1.2 'Fraunces',Georgia,serif;margin-bottom:10px}
+#grid{display:grid;grid-template-columns:repeat(8,54px);gap:6px}
+#need{margin-top:12px;font-size:13px;line-height:1.5;color:rgba(246,236,210,.8);max-width:470px}
+#pills{display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap}
+.pill{font-size:12px;padding:4px 10px;border-radius:99px;border:1px solid var(--line);color:rgba(246,236,210,.6)}
+.pill.on{background:rgba(143,191,90,.22);border-color:rgba(143,191,90,.7);color:#d9efbf}
+#recipes{overflow:auto;padding-right:6px;flex:1;min-height:120px}
+#recipes h3{font:500 14px 'Fraunces',Georgia,serif;margin:12px 0 6px;color:var(--amber)}
+.rec{display:flex;align-items:center;gap:10px;padding:7px 8px;border-radius:10px;border:1px solid transparent;margin-bottom:4px;background:rgba(255,255,255,.04)}
+.rec.ok{border-color:rgba(143,191,90,.35)}
+.rec img{width:38px;height:38px;flex:0 0 auto}
+.rec .rt{flex:1;min-width:0;font-size:13px}
+.rec .rt b{font-weight:600;display:block}
+.rec .rt span{font-size:12px;color:rgba(246,236,210,.75)}
+.rec i{font-style:normal;margin-right:8px;white-space:nowrap}
+.rec i.have{color:#cfe8b0}.rec i.lack{color:#f0a08c}
+.rec button{font:600 13px system-ui;border:0;border-radius:8px;padding:8px 14px;background:var(--amber);color:#1c1408;cursor:pointer}
+.rec button:disabled{opacity:.35;cursor:default}
+#closeInv,#closeJ{position:absolute;right:16px;top:14px;font-size:13px;color:rgba(246,236,210,.7)}
+
+.overlay{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:radial-gradient(ellipse at 50% 60%,rgba(10,16,6,.35),rgba(6,10,4,.85));padding:20px;z-index:8}
+.card{max-width:560px}
+.card h1{font:800 clamp(44px,9vw,78px)/.95 'Fraunces',Georgia,serif;letter-spacing:-.02em}
+.card h1.sm{font-size:clamp(34px,7vw,52px)}
+.card p{margin-top:16px;font-size:16px;line-height:1.55;color:rgba(246,236,210,.92);max-width:48ch}
+.card ul{margin-top:16px;list-style:none;font-size:14px;line-height:1.85;color:rgba(246,236,210,.85);columns:2;column-gap:26px}
+.card ul b{color:var(--amber);font-weight:600;display:inline-block;min-width:74px}
+button.go{margin-top:24px;font:600 16px system-ui,sans-serif;color:#1c1408;background:var(--amber);border:0;border-radius:12px;padding:14px 26px;cursor:pointer;box-shadow:0 6px 22px rgba(242,177,52,.35)}
+button.go:disabled{opacity:.55;cursor:default}
+button.go.alt{background:transparent;color:var(--paper);border:1px solid var(--line);box-shadow:none;margin-left:10px}
+button:focus-visible{outline:3px solid var(--paper);outline-offset:3px}
+
+#touch{position:fixed;inset:0;pointer-events:none;z-index:3}
+#stickBase{position:absolute;width:112px;height:112px;margin:-56px 0 0 -56px;border-radius:50%;border:2px solid rgba(246,236,210,.35);background:rgba(14,19,9,.3);display:none}
+#stickKnob{position:absolute;left:50%;top:50%;width:48px;height:48px;margin:-24px 0 0 -24px;border-radius:50%;background:rgba(246,236,210,.5)}
+.tbtn{position:absolute;width:62px;height:62px;border-radius:50%;pointer-events:auto;background:rgba(14,19,9,.55);border:2px solid rgba(246,236,210,.4);color:var(--paper);font:600 12px system-ui;display:flex;align-items:center;justify-content:center}
+#tUse{right:calc(18px + env(safe-area-inset-right,0px));bottom:calc(96px + env(safe-area-inset-bottom,0px));width:76px;height:76px}
+#tJump{right:calc(104px + env(safe-area-inset-right,0px));bottom:calc(96px + env(safe-area-inset-bottom,0px))}
+#tBlock{right:calc(18px + env(safe-area-inset-right,0px));bottom:calc(184px + env(safe-area-inset-bottom,0px))}
+#tRun{right:calc(104px + env(safe-area-inset-right,0px));bottom:calc(172px + env(safe-area-inset-bottom,0px))}
+#tE{right:calc(18px + env(safe-area-inset-right,0px));bottom:calc(266px + env(safe-area-inset-bottom,0px))}
+#tBag{right:calc(104px + env(safe-area-inset-right,0px));bottom:calc(248px + env(safe-area-inset-bottom,0px))}
+@media (max-width:760px){#invBox{flex-direction:column;overflow:auto}#grid{grid-template-columns:repeat(8,40px)}#grid .slot{width:40px;height:40px}#grid .slot img{width:30px;height:30px}#hotbar .slot{width:40px;height:40px}#hotbar .slot img{width:30px;height:30px}#bars{width:150px}}
+
+/* Pack controls, resource feedback and a layout that keeps HUD panels apart. */
+button,select{font:inherit;color:var(--paper)}
+.packActions,.craftFilters{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}
+.packActions button,.craftFilters select,#actionBar button,.overlayClose{background:#28301d;border:1px solid var(--line);border-radius:7px;padding:6px 9px;cursor:pointer}
+.craftFilters label{font-size:12px;display:flex;align-items:center;gap:5px}
+#craftHint{font-size:12px;line-height:1.5;margin:0 0 8px;color:#d9efbf}
+#invL{overflow:auto;min-height:0}#invBox{position:relative;padding-top:48px}#jBox{position:relative;padding-top:48px}
+.overlayClose{position:absolute;right:14px;top:10px}#closeInv,#closeJ{display:none}
+#chestGrid{display:grid;grid-template-columns:repeat(8,40px);gap:4px}#chestGrid .slot{width:40px;height:40px}#chestGrid img{width:30px;height:30px}
+#chestPanel h3{margin:12px 0 6px;font-size:14px}#chestPanel p{font-size:12px;margin-bottom:6px}
+#actionBar{position:fixed;left:50%;bottom:92px;transform:translateX(-50%);display:flex;align-items:center;gap:6px;font-size:11px;max-width:94vw}
+#heldName{background:#182010dc;padding:6px;border-radius:6px;white-space:nowrap}#handsBtn.active{border-color:var(--amber);color:var(--amber)}
+#harvestProgress{position:fixed;left:50%;top:calc(50% + 66px);transform:translateX(-50%);width:200px;text-align:center;font-size:11px;background:#10160be8;padding:7px;border-radius:8px;pointer-events:none}
+#harvestProgress .bar{margin-bottom:4px}#harvestFill{background:var(--amber)}
+#toast{top:auto;bottom:145px;font:500 15px/1.4 system-ui;max-width:min(420px,calc(100vw - 400px));z-index:9}
+#prompt{max-width:94vw;white-space:normal;text-align:center}#pause .card p{margin:12px 0}#pause{z-index:12}
+@media(max-width:1100px){#bars{bottom:140px;width:165px;padding:8px}#toast{bottom:140px;max-width:calc(100vw - 390px)}#stn{display:none}#invBox{flex-direction:column;overflow:auto}#invL{overflow:visible}#invR{min-height:260px}#grid{grid-template-columns:repeat(8,40px)}#grid .slot{width:40px;height:40px}#grid .slot img{width:30px;height:30px}}
+@media(max-width:600px){#bars{top:14px;bottom:auto;width:140px}#clockP{max-width:48vw}#goal{top:104px;width:46vw}#toast{max-width:90vw;bottom:160px}#hotbar{gap:3px;padding:5px}#actionBar{bottom:72px;flex-wrap:wrap;justify-content:center;width:94vw}#heldName{white-space:normal}#harvestProgress{width:170px}#invBox{padding:44px 10px 12px}#grid{grid-template-columns:repeat(8,minmax(0,1fr));gap:3px}#grid .slot{width:100%;height:36px}#chestGrid{grid-template-columns:repeat(8,minmax(0,1fr));gap:3px}#chestGrid .slot{width:100%;height:36px}}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="flash"></div><div id="fade"></div><div id="xh"></div><div id="prompt"></div>
+
+<div id="harvestProgress" class="hidden"><div class="bar"><i id="harvestFill"></i></div><span id="harvestLabel"></span></div>
+<div id="hud" class="hidden">
+  <div id="bars" class="panel">
+    <div class="b"><span>Health</span><div class="bar"><i id="hpF"></i></div></div>
+    <div class="b"><span>Hunger</span><div class="bar"><i id="fdF"></i></div></div>
+    <div class="b"><span>Stamina</span><div class="bar"><i id="stF"></i></div></div>
+  </div>
+  <div id="clockP" class="panel"><div id="clockT">Morning</div><small id="clockS"></small><small id="clockC"></small></div>
+  <div id="stn" class="panel">Tab opens your pack and crafting<br>1 to 8 or wheel picks an item<br>Left click any block to dig it<br>Coal and a stick make torches<br>J opens your journal and collection</div>
+  <div id="toast"></div>
+  <div id="goal" class="panel" title="Open your journal (J)"><b id="goalArc"></b><span id="goalStep"></span><small id="goalNote"></small><small>Journal (J)</small></div>
+  <div id="dawn" class="panel"></div>
+  <div id="boss" class="panel hidden"><b id="bossName"></b><div class="bar"><i id="bossF"></i></div></div>
+  <div id="speech" class="panel"><b id="spName"></b><small id="spTier"></small><span id="spText"></span></div>
+  <div id="actionBar"><span id="heldName"></span><button id="handsBtn">Hands [H]</button><button id="inspectHomeBtn">Home [B]</button><button id="pauseBtn">Pause</button></div><div id="hotbar" class="panel"></div>
+</div>
+
+<div id="inv" class="hidden">
+  <div id="invBox" class="panel"><button id="closePackBtn" class="overlayClose">Close pack · Tab / Esc</button>
+    <div id="invL"><h2>Pack</h2><div id="grid"></div><div class="packActions"><button id="sortPackBtn">Sort</button><button id="splitPackBtn">Split</button><button id="transferPackBtn">Transfer</button><button id="dropPackBtn">Drop</button></div><div id="need">Select a stack, then an action or destination. Shift-click transfers; Ctrl-click splits. Matching stacks merge. The first row is your hotbar. Time pauses here.</div><section id="chestPanel" class="hidden"><h3>Storage chest</h3><p>Click to take. Select a pack stack and Transfer to store.</p><div id="chestGrid"></div></section></div>
+    <div id="invR"><h2>Crafting</h2><div id="pills"></div><div class="craftFilters"><select id="recipeCategory" aria-label="Recipe category"><option value="">All categories</option></select><select id="craftBatch" aria-label="Craft batches"><option value="1">1 batch</option><option value="5">5 batches</option><option value="10">10 batches</option></select><label><input type="checkbox" id="craftableOnly"> Craftable now</label></div><p id="craftHint"></p><div id="recipes"></div></div>
+  </div>
+  <div id="closeInv">Press Tab or Esc to close</div>
+</div>
+
+<div id="journal" class="hidden">
+  <div id="jBox" class="panel"><button id="closeJournalBtn" class="overlayClose">Close journal · J / Esc</button>
+    <div id="jTabs"><button id="jtGoals" class="on">Quests</button><button id="jtLore">Lore</button><button id="jtLog">Collection <span id="jCount"></span></button></div>
+    <div id="jBody"></div>
+  </div>
+  <div id="closeJ">Press J or Esc to close</div>
+</div>
+
+<div id="dialogue" class="hidden">
+  <div id="dialogueBox" class="panel" role="dialog" aria-modal="true" aria-labelledby="dialogueName">
+    <h2 id="dialogueName">Bramble</h2><p id="dialogueText"></p><div id="dialogueActions" class="dlgActions"></div>
+  </div>
+</div>
+
+<div id="touch" class="hidden">
+  <div id="stickBase"><div id="stickKnob"></div></div>
+  <div class="tbtn" id="tUse">Use</div><div class="tbtn" id="tJump">Hop</div><div class="tbtn" id="tBlock">Block</div>
+  <div class="tbtn" id="tRun">Run</div><div class="tbtn" id="tE">Touch</div><div class="tbtn" id="tBag">Pack</div>
+</div>
+
+<div id="start" class="overlay">
+  <div class="card">
+    <h1>Thistlewick</h1>
+    <p>Begin in a clearing safe from beetles. Chop trees and fallen logs, gather mushrooms, and harvest grass and flowers for fibre and wild seeds. Hold E to gather rooted plants; tools work faster. Gold-green grass patches yield fibre; other grass is decorative in new worlds. Pick loose items deliberately. Press H for hands. Craft tools, grow food, build a home, and reshape the land. Beyond the clearing, use walls and campfires to shelter from the night.</p>
+    <ul>
+      <li><b>Move</b>WASD</li><li><b>Run</b>Shift</li>
+      <li><b>Hop</b>Space</li><li><b>Use</b>Left click</li>
+      <li><b>Block</b>F or right click</li><li><b>Touch</b>E</li>
+      <li><b>Pack</b>Tab</li><li><b>Look</b>Mouse</li>
+    </ul>
+    <button class="go" id="goBtn" disabled>Growing the forest...</button><button class="go alt hidden" id="newBtn">Start over</button>
+  </div>
+</div>
+<div id="pause" class="overlay hidden"><div class="card"><h1 class="sm">Paused</h1><p>Your world is saved. Time, hunger and beetles are paused.</p><button class="go" id="resumeBtn">Resume · Esc</button></div></div>
+<div id="over" class="overlay hidden">
+  <div class="card">
+    <h1 class="sm" id="overTitle"></h1><p id="overText"></p><button class="go" id="overBtn"></button>
+  </div>
+</div>
+
+<script src="dist/game.js"></script>
+</body>
+</html>

@@ -1,0 +1,263 @@
+{
+  "errors": [],
+  "observations": {
+    "world": {
+      "seed": -1421759901,
+      "genVersion": 3,
+      "position": [
+        0,
+        0,
+        3
+      ],
+      "inventory": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ]
+    },
+    "eightSecondsKeyboardWalk": {
+      "position": [
+        0,
+        0,
+        -1.1178320859501973
+      ],
+      "hunger": 79.64700799999999,
+      "inventory": []
+    },
+    "openPackHunger": {
+      "before": 79.54901599999998,
+      "after": 77.14901599999705,
+      "seconds": 10,
+      "uiOpen": true
+    },
+    "localResourceDensity": {
+      "within24Blocks": 403,
+      "automatic": {
+        "stone": 9,
+        "stick": 9,
+        "fiber": 8,
+        "mushroom": 3
+      },
+      "manual": {
+        "Loose stone": 15,
+        "Red mushroom": 3,
+        "Fern": 12,
+        "Leaf litter": 42,
+        "Twig": 14,
+        "Wildflower": 2,
+        "Grass": 284,
+        "Brown mushroom": 2
+      }
+    },
+    "movementOnlyRoute": {
+      "seconds": 40,
+      "samples": [
+        {
+          "key": "KeyW",
+          "position": [
+            0,
+            -44.679999999999396
+          ],
+          "inventory": [
+            {
+              "id": "stone",
+              "n": 1
+            }
+          ]
+        },
+        {
+          "key": "KeyD",
+          "position": [
+            8.6,
+            -44.760000000000005
+          ],
+          "inventory": [
+            {
+              "id": "stone",
+              "n": 1
+            }
+          ]
+        },
+        {
+          "key": "KeyS",
+          "position": [
+            8.6,
+            -40.4
+          ],
+          "inventory": [
+            {
+              "id": "stone",
+              "n": 1
+            }
+          ]
+        },
+        {
+          "key": "KeyA",
+          "position": [
+            -7.6,
+            -40.37316107969601
+          ],
+          "inventory": [
+            {
+              "id": "stone",
+              "n": 1
+            },
+            {
+              "id": "mushroom",
+              "n": 1
+            }
+          ]
+        }
+      ]
+    },
+    "manualHarvest": [
+      {
+        "label": "Grass",
+        "actions": 1,
+        "dead": true,
+        "gained": 1
+      },
+      {
+        "label": "Fern",
+        "actions": 1,
+        "dead": true,
+        "gained": 1
+      },
+      {
+        "label": "Leaf litter",
+        "actions": 1,
+        "dead": true,
+        "gained": 1
+      },
+      {
+        "label": "Twig",
+        "actions": 1,
+        "dead": true,
+        "gained": 1
+      },
+      {
+        "label": "Loose stone",
+        "actions": 1,
+        "dead": true,
+        "gained": 1
+      },
+      {
+        "label": "Red mushroom",
+        "actions": 1,
+        "dead": true,
+        "gained": 1
+      },
+      {
+        "label": "Brown mushroom",
+        "actions": 1,
+        "dead": true,
+        "gained": 1
+      },
+      {
+        "label": "Wildflower",
+        "actions": 1,
+        "dead": true,
+        "gained": 1
+      }
+    ],
+    "treeToolComparison": {
+      "hp": 13.008505016975104,
+      "yield": 5,
+      "result": [
+        {
+          "tool": "hands",
+          "hits": 14,
+          "wood": 5
+        },
+        {
+          "tool": "waxe",
+          "hits": 6,
+          "wood": 5
+        },
+        {
+          "tool": "saxe",
+          "hits": 4,
+          "wood": 5
+        },
+        {
+          "tool": "iaxe",
+          "hits": 3,
+          "wood": 5
+        }
+      ]
+    },
+    "fullPackLoss": {
+      "treeDead": true,
+      "wood": 0,
+      "cropExists": false,
+      "roots": 0,
+      "seeds": 0
+    },
+    "craftWithFreedSlot": {
+      "wood": 1,
+      "plank": 0,
+      "toast": "Your pack is full"
+    },
+    "cropEOnUnripe": {
+      "cropExists": false,
+      "seedReturned": 1
+    },
+    "stoneTierSkip": {
+      "stonePick": 1,
+      "woodenPickCrafted": false,
+      "goal": "Craft a wooden pickaxe at the workbench"
+    },
+    "heldFoodInterceptedByGrass": {
+      "hunger": 30,
+      "berries": 3,
+      "grassHarvested": true
+    },
+    "heldStoneCannotSwing": {
+      "swing": 0,
+      "toast": "You cannot place that there"
+    },
+    "clearanceEOpensPack": {
+      "opened": true
+    },
+    "escapeBehaviour": {
+      "state": "play",
+      "uiOpen": false,
+      "journalOpen": false
+    },
+    "afterEscape": {
+      "state": "play",
+      "uiOpen": false,
+      "journalOpen": false
+    },
+    "elderDropAndRecipe": {
+      "dropMinimum": 2,
+      "recipe": {
+        "eshell": 3,
+        "ingot": 2,
+        "crystal": 2
+      },
+      "bossDefeated": false
+    }
+  }
+}
